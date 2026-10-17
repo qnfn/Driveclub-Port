@@ -36,10 +36,6 @@ This is the Windows backend of [Driveclub Native](https://github.com/BlackLineIn
 
 Requirements: Windows 10/11 64-bit, a CPU with AVX, a Vulkan 1.3 GPU. More details and the source layout: [`windows/README.md`](windows/README.md).
 
-## How it was made
-
-The Windows port was directed and tested by [qnfn](https://github.com/qnfn); most of its code (runtime changes, launcher, tools) was written with **Claude** (Anthropic's AI, in Claude Code).
-
 ## Credits
 
 DCport (the Windows backend) is a modified version of other people's work; almost all of it is theirs.
