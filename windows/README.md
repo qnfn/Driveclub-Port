@@ -20,9 +20,10 @@ No game files are included. You need your own dump of DRIVECLUB 1.28 (the folder
 
 1. Unzip anywhere and start `DriveClub.exe`.
 2. The first time, choose your game folder. On the first PLAY, DCport prepares the game files on your PC (once, under a minute).
-3. The launcher has five tabs:
+3. The launcher has six tabs:
    - **RACE**: game art, ready checks, PLAY, quick frame rate, window and FPS counter
-   - **SETUP**: game folder, frame rate (30–240, tested up to 120), window mode, FPS counter, upscaler (FSR edition)
+   - **SETUP**: game folder, frame rate (30–240, tested up to 120), window mode and size, render resolution (1080p–4K), FPS counter; FSR edition: upscaler, sharpness, frame generation, FSR 4.1.1 set-up
+   - **PATCHES**: community game patches (frame-rate patch type, no barriers, no reset, no motion blur/DOF, photo mode)
    - **CONTROLS**: keyboard and controller bindings
    - **GARAGE**: save profiles, backups with restore, shader cache, desktop shortcut, Add to Steam
    - **LOG**: last run's log, "Copy for bug report"
@@ -31,6 +32,12 @@ No game files are included. You need your own dump of DRIVECLUB 1.28 (the folder
 6. In game, Insert (or L3+R3) opens the settings menu.
 
 Requirements: Windows 10/11 64-bit, a CPU with AVX, a Vulkan 1.3 GPU.
+
+### FSR edition extras (0.3.0)
+
+- **FSR in every race:** Driveclub's TAA resolve comes in three variants (menus, races, others); FSR 3.1/4 replace all of them. The FPS counter names the upscaler only while it really runs ("TAA" otherwise).
+- **Frame generation:** FSR 3 frame interpolation (FSR-Vulkan) with a HUD-less copy of each frame; the game runs at half the chosen rate and every frame gets a generated one (120 FPS = 60 + 60). The counter shows both rates.
+- **FSR 4.1.1 (optional, bring your own DLL):** SETUP > *Set up FSR 4.1.1…* runs your own `amd_fidelityfx_upscaler_dx12.dll` once on DirectX 12, translates its shaders to SPIR-V on your PC (`bin/fsr411`: fsr4cap, dxil-spirv, SPIRV-Tools) and writes `fsr4_411/`, which the runtime replays in Vulkan. Nothing of AMD's is in the release or in this repository; AMD's FidelityFX loader is downloaded from AMD's public SDK repository during set-up. AMD's own DLL offers FSR 4.1.1 on Radeon RX 9000 only.
 
 ## Source in this folder
 
@@ -47,7 +54,7 @@ DCport is built on other people's work: the native PS4 runtime by deadinside28 a
 - **Native PS4 runtime:** deadinside28 ([bloodborne_pc](https://github.com/deadinside28/bloodborne_pc)) and the Windows port by Supermedo ([bloodborne_pc](https://github.com/Supermedo/bloodborne_pc)).
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4):** renderer, shader recompiler and libraries the runtime is built on.
 - **[akitaonrails](https://github.com/akitaonrails/shadPS4):** shadPS4 investigation of Driveclub (MSAA depth resolve).
-- **Also used:** [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) and the AMD FidelityFX SDK (FSR), FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX); FreeType, SDL3, FFmpeg and the other libraries listed in `licenses/`.
+- **Also used:** [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) and the AMD FidelityFX SDK (FSR, FSR 3 frame generation), FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX); [dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv) (MIT) and [SPIRV-Tools](https://github.com/KhronosGroup/SPIRV-Tools) (Apache 2.0) for the FSR 4.1.1 set-up; FreeType, SDL3, FFmpeg and the other libraries listed in `licenses/`.
 - **Community patches** ([shadps4-emu/ps4_cheats](https://github.com/shadps4-emu/ps4_cheats)): illusion, u/Charlie_Muggins, kalaposfos.
 - Windows port by **qnfn**; the Driveclub-specific changes (system functions, fonts, readbacks, upscaler integration, launcher) were written with the help of Claude (Anthropic).
 
@@ -57,7 +64,7 @@ DCport is built on other people's work: the native PS4 runtime by deadinside28 a
 - **Intellectual Property:** Driveclub is a registered trademark of Sony Interactive Entertainment LLC. All trademarks, service marks, game titles, and copyrighted assets belong to Sony Interactive Entertainment and Evolution Studios. PlayStation and PS4 are trademarks of Sony Interactive Entertainment Inc.
 - **Educational and Preservation Purpose:** This repository is an independent reverse-engineering project conducted strictly for interoperability, software preservation, and educational purposes. It is not affiliated with, endorsed by, or sponsored by Sony Interactive Entertainment, Evolution Studios, or any associated entities.
 - **Free:** DCport is free and always will be. If someone sold it to you, ask for your money back.
-- **FSR (Windows):** AMD, FidelityFX and FSR are trademarks of Advanced Micro Devices, Inc.; DCport is not affiliated with AMD. The FSR edition's download includes FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX) under AMD's MIT license (`fsr4_shaders/LICENSE-FSR4-v07.txt`). They are not part of this repository.
+- **FSR (Windows):** AMD, FidelityFX and FSR are trademarks of Advanced Micro Devices, Inc.; DCport is not affiliated with AMD. The FSR edition's download includes FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX) under AMD's MIT license (`fsr4_shaders/LICENSE-FSR4-v07.txt`). They are not part of this repository. FSR 4.1.1 is never distributed: it is built on the player's PC from their own DLL.
 - **No Warranty:** DCport is provided "as is", without warranty of any kind (see the GPL). Use it at your own risk and keep a backup of your saves.
 - Rights holders with a concern can open an issue on this repository; we will respond promptly.
 
