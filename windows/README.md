@@ -30,7 +30,7 @@ Also new: **FSR in every race** (0.2.0's FSR ran in menus only), **FSR 3 frame g
 
 ## Download
 
-Get the latest release from the Releases page:
+**Download: [DCport releases](https://github.com/qnfn/Driveclub-Port/releases/latest)** (the Windows builds are published on qnfn's fork, not on this repository's Releases page):
 
 - `DCport-<version>-windows-fsr.zip`: with FSR 3.1 and FSR 4 (FSR 4 needs a recent AMD or NVIDIA GPU)
 - `DCport-<version>-windows.zip`: without upscaling
