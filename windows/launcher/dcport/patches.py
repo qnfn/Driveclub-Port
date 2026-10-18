@@ -54,14 +54,22 @@ class Resolution:
     size: tuple[int, int]
     patches: tuple[str, ...]
     extra_dmem_mb: int
+    game_args: str = ""  # the game's own command-line switches (runtime: DC_GAME_ARGS)
 
 
-# The game renders at its own 1920x1080: the community render patches above it leave some of
-# its passes at 1080p (a square at x 1920 / y 1080 in the picture) and lost the device in races.
-# A bigger window or screen gets the 1080p frame scaled up with FSR 1 instead. An older saved
-# render_res (1440p, 4K) falls back to this one.
+# The game renders at its own 1920x1080. The community "Internal resolution" patches only
+# change the engine's scene-size table and leave some passes at 1080p (a square at x 1920 /
+# y 1080). Above 1080p the engine is asked instead through its own -resolutionscale switch,
+# which sizes every render target itself; the Output patch sizes the display buffers and the
+# Memory patch grows the game's video-memory budget (SETUP > Render).
 RESOLUTIONS = (
     Resolution("1080p", "1080p", (1920, 1080), (), 0),
+    Resolution("1440p", "1440p", (2560, 1440),
+               ("1440p [2560x1440] Output resolution", "Memory for up to 1440p"), 3000,
+               "-resolutionscale 1.3333"),
+    Resolution("2160p", "4K", (3840, 2160),
+               ("4K [3840x2160] Output resolution", "Memory for up to 4K"), 5000,
+               "-resolutionscale 2"),
 )
 DEFAULT_RESOLUTION = "1080p"
 
@@ -93,6 +101,10 @@ def patch_names(s: LauncherSettings) -> list[str]:
     names += [n for n in s.patches if n in known]
     names += resolution(s.render_res).patches
     return names
+
+
+def game_args(s: LauncherSettings) -> str:
+    return resolution(s.render_res).game_args
 
 
 def dmem_mb(s: LauncherSettings) -> int:

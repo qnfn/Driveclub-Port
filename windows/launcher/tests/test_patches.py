@@ -36,10 +36,16 @@ def test_unknown_names_and_keys_are_ignored():
     assert patches.patch_names(s) == ["60 FPS with deltatime", "Barrier Disable"]
 
 
-def test_an_older_render_resolution_falls_back_to_1080p():
+def test_render_above_1080p_uses_the_engine_scale_not_the_internal_patch():
     s = LauncherSettings(patch_timing="fixed", render_res="1440p")
-    assert patches.patch_names(s) == ["60 FPS with fixed tickrate"]
-    assert patches.dmem_mb(s) == 5056
+    assert patches.patch_names(s) == ["60 FPS with fixed tickrate",
+                                      "1440p [2560x1440] Output resolution",
+                                      "Memory for up to 1440p"]
+    assert patches.dmem_mb(s) == 5056 + 3000
+    assert patches.game_args(s) == "-resolutionscale 1.3333"
+    assert patches.game_args(LauncherSettings(render_res="2160p")) == "-resolutionscale 2"
+    assert patches.game_args(LauncherSettings()) == ""
+    assert not any("Internal" in p for r in patches.RESOLUTIONS for p in r.patches)
 
 
 def test_window_size():

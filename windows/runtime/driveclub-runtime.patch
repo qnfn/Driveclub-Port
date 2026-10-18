@@ -41,6 +41,35 @@ index 0fcf416..78758a4 100644
      return ORBIS_OK;
  }
  
+diff --git a/gpu/shadps4/common/slot_vector.h b/gpu/shadps4/common/slot_vector.h
+index 3009bd2..0bebee2 100644
+--- a/gpu/shadps4/common/slot_vector.h
++++ b/gpu/shadps4/common/slot_vector.h
+@@ -122,7 +122,8 @@ public:
+     }
+ 
+     bool is_allocated(SlotId id) const {
+-        return ReadStorageBit(id.index);
++        // Stale or invalid ids (e.g. 0xFFFFFFFF) must not read past the bitset.
++        return id.index / 64 < stored_bitset.size() && ReadStorageBit(id.index);
+     }
+ 
+     template <typename... Args>
+diff --git a/gpu/shadps4/core/libraries/kernel/equeue.cpp b/gpu/shadps4/core/libraries/kernel/equeue.cpp
+index 7ed911d..19efb6d 100644
+--- a/gpu/shadps4/core/libraries/kernel/equeue.cpp
++++ b/gpu/shadps4/core/libraries/kernel/equeue.cpp
+@@ -175,7 +175,9 @@ bool EqueueInternal::RemoveEvent(u64 id, s16 filter) {
+ int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKernelUseconds* timo) {
+     if (timo != nullptr && *timo == 0) {
+         // Effectively acts as a poll; only events that have already
+-        // arrived at the time of this function call can be received
++        // arrived at the time of this function call can be received. Under the lock like the
++        // waiting path: it edits m_events while GPU/flip threads trigger events.
++        std::scoped_lock lock{m_mutex};
+         return GetTriggeredEvents(ev, num);
+     }
+     const auto micros = timo ? *timo : 0u;
 diff --git a/gpu/shadps4/core/libraries/videoout/driver.cpp b/gpu/shadps4/core/libraries/videoout/driver.cpp
 index 35b0f1b..c871364 100644
 --- a/gpu/shadps4/core/libraries/videoout/driver.cpp
@@ -141,6 +170,21 @@ index fc4bf4b..174cece 100644
      ctx.OpImageWrite(image, coords, texel, operands.mask, operands.operands);
  }
  
+diff --git a/gpu/shadps4/shader_recompiler/frontend/control_flow_graph.cpp b/gpu/shadps4/shader_recompiler/frontend/control_flow_graph.cpp
+index 736d563..72e3a97 100644
+--- a/gpu/shadps4/shader_recompiler/frontend/control_flow_graph.cpp
++++ b/gpu/shadps4/shader_recompiler/frontend/control_flow_graph.cpp
+@@ -192,7 +192,9 @@ void CFG::SplitDivergenceScopes() {
+             if ((is_close || index == blk->end_index) && curr_begin != -1) {
+                 // If there are no instructions inside scope don't do anything.
+                 if (index - curr_begin == 1 && is_close) {
+-                    curr_begin = -1;
++                    // The closing instruction may open the next scope itself (a save-exec right
++                    // after the branch): keep it, or that code would run on inactive lanes.
++                    curr_begin = is_open_scope(inst) ? static_cast<s32>(index) : -1;
+                     continue;
+                 }
+                 // If all instructions in the scope ignore exec masking, we shouldn't insert a
 diff --git a/gpu/shadps4/shader_recompiler/frontend/translate/export.cpp b/gpu/shadps4/shader_recompiler/frontend/translate/export.cpp
 index 616c7c6..6c337fb 100644
 --- a/gpu/shadps4/shader_recompiler/frontend/translate/export.cpp
@@ -171,8 +215,109 @@ index 616c7c6..6c337fb 100644
          ir.SetAttribute(mrt, converted, i);
      }
  }
+diff --git a/gpu/shadps4/shader_recompiler/frontend/translate/vector_alu.cpp b/gpu/shadps4/shader_recompiler/frontend/translate/vector_alu.cpp
+index 717220b..a5ef68a 100644
+--- a/gpu/shadps4/shader_recompiler/frontend/translate/vector_alu.cpp
++++ b/gpu/shadps4/shader_recompiler/frontend/translate/vector_alu.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <limits>
+ #include "shader_recompiler/frontend/opcodes.h"
+ #include "shader_recompiler/frontend/translate/translate.h"
+ #include "shader_recompiler/ir/attribute.h"
+@@ -8,6 +9,13 @@
+ 
+ namespace Shader::Gcn {
+ 
++/// The *_CLAMP / *_LEGACY transcendental ops never return infinity: the hardware clamps to the
++/// largest finite float. Plain ops gave +-Inf for 0 inputs, and Inf * 0 later turned into NaN.
++static IR::F32 ClampToFinite(IR::IREmitter& ir, const IR::F32& value) {
++    constexpr float max = std::numeric_limits<float>::max();
++    return IR::F32{ir.FPClamp(value, ir.Imm32(-max), ir.Imm32(max))};
++}
++
+ void Translator::EmitVectorAlu(const GcnInst& inst) {
+     switch (inst.opcode) {
+         // VOP2
+@@ -167,8 +175,10 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
+         return V_FLOOR_F32(inst);
+     case Opcode::V_EXP_F32:
+         return V_EXP_F32(inst);
+-    case Opcode::V_LOG_CLAMP_F32:
+-        return V_LOG_F32(inst);
++    case Opcode::V_LOG_CLAMP_F32: {
++        const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
++        return SetDst(inst.dst[0], ClampToFinite(ir, ir.FPLog2(src0)));
++    }
+     case Opcode::V_LOG_F32:
+         return V_LOG_F32(inst);
+     case Opcode::V_RCP_F32:
+@@ -179,12 +189,21 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
+         return V_RCP_F64(inst);
+     case Opcode::V_RCP_IFLAG_F32:
+         return V_RCP_F32(inst);
+-    case Opcode::V_RCP_CLAMP_F32:
+-        return V_RCP_F32(inst);
+-    case Opcode::V_RSQ_CLAMP_F32:
+-        return V_RSQ_F32(inst);
+-    case Opcode::V_RSQ_LEGACY_F32:
+-        return V_RSQ_F32(inst);
++    case Opcode::V_RCP_CLAMP_F32: {
++        const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
++        return SetDst(inst.dst[0], ClampToFinite(ir, IR::F32{ir.FPRecip(src0)}));
++    }
++    case Opcode::V_RSQ_CLAMP_F32: {
++        const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
++        return SetDst(inst.dst[0], ClampToFinite(ir, IR::F32{ir.FPRecipSqrt(src0)}));
++    }
++    case Opcode::V_RSQ_LEGACY_F32: {
++        // Legacy rsq additionally returns 0 for a 0 input.
++        const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
++        const IR::F32 zero{ir.Imm32(0.0f)};
++        const IR::F32 clamped{ClampToFinite(ir, IR::F32{ir.FPRecipSqrt(src0)})};
++        return SetDst(inst.dst[0], IR::F32{ir.Select(ir.FPEqual(src0, zero), zero, clamped)});
++    }
+     case Opcode::V_RSQ_F32:
+         return V_RSQ_F32(inst);
+     case Opcode::V_SQRT_F32:
+diff --git a/gpu/shadps4/shader_recompiler/runtime_info.h b/gpu/shadps4/shader_recompiler/runtime_info.h
+index 43ce32d..81ecc30 100644
+--- a/gpu/shadps4/shader_recompiler/runtime_info.h
++++ b/gpu/shadps4/shader_recompiler/runtime_info.h
+@@ -169,8 +169,9 @@ struct HwGeometryRuntimeInfo {
+     u64 vs_copy_hash;
+ 
+     bool operator==(const HwGeometryRuntimeInfo& other) const {
+-        return num_outputs == other.num_outputs && outputs == other.outputs && num_invocations &&
+-               other.num_invocations && output_vertices == other.output_vertices &&
++        return num_outputs == other.num_outputs && outputs == other.outputs &&
++               num_invocations == other.num_invocations &&
++               output_vertices == other.output_vertices &&
+                in_primitive == other.in_primitive &&
+                std::ranges::equal(out_primitive, other.out_primitive) &&
+                vs_copy_hash == other.vs_copy_hash;
+diff --git a/gpu/shadps4/shader_recompiler/specialization.h b/gpu/shadps4/shader_recompiler/specialization.h
+index 75b9dc9..e6b7a50 100644
+--- a/gpu/shadps4/shader_recompiler/specialization.h
++++ b/gpu/shadps4/shader_recompiler/specialization.h
+@@ -217,6 +217,13 @@ struct StageSpecialization {
+         // bindings still may change as they depend on previously processed FS. The check below
+         // handles this case and prevents generation of redundant permutations. This is also safe
+         // for other types of shaders with no bindings.
++        // Except for the user-data start: compiled code indexes user-data registers from
++        // start.user_data, so a different start needs its own permutation (else wrong constants).
++        // Compared unconditionally: `info` is not valid for specializations loaded from the
++        // pipeline cache, so it must not be read here.
++        if (start.user_data != other.start.user_data) {
++            return false;
++        }
+         if (bitset.none() && other.bitset.none()) {
+             return true;
+         }
 diff --git a/gpu/shadps4/video_core/amdgpu/liverpool.cpp b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
-index c137807..31d37f6 100644
+index c137807..89a4909 100644
 --- a/gpu/shadps4/video_core/amdgpu/liverpool.cpp
 +++ b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
 @@ -320,6 +320,7 @@ void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
@@ -191,6 +336,83 @@ index c137807..31d37f6 100644
          rasterizer.Finish();
          const u32 value = rasterizer.ReadDataFromGds(event_eos.gds_index);
          *event_eos.Address() = value;
+@@ -443,7 +445,10 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
+         }
+         case PM4ItOpcode::WaitOnDeCounterDiff: {
+             const auto diff = it_body[0];
+-            while ((cblock.de_count - cblock.ce_count) >= diff) {
++            // The CE may run at most `diff` ahead of the DE. Unsigned counters: compare first,
++            // the old de - ce underflowed whenever the CE was ahead and spun forever.
++            while (cblock.ce_count >= cblock.de_count &&
++                   (cblock.ce_count - cblock.de_count) >= diff) {
+                 YIELD_CE();
+             }
+             break;
+@@ -458,6 +463,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
+                 YIELD_CE();
+                 RESUME_CE(task);
+             }
++            task.handle.destroy(); // nested buffer frames are never freed otherwise
+             break;
+         }
+         default:
+@@ -586,6 +592,9 @@ void Liverpool::ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header,
+     case PM4ItOpcode::IndexBufferSize:
+         regs.num_indices = reinterpret_cast<const PM4CmdDrawIndexBufferSize*>(header)->num_indices;
+         mark_field(regs.num_indices);
++        // Also kept apart from num_indices for indirect draws (Regs::IndexBufferSizeWord).
++        regs.reg_array[Regs::IndexBufferSizeWord] = regs.num_indices;
++        mark(Regs::IndexBufferSizeWord, 1);
+         break;
+     case PM4ItOpcode::EventWrite: {
+         const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
+@@ -1280,6 +1289,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                     YIELD_GFX();
+                     RESUME_GFX(task);
+                 }
++                task.handle.destroy(); // nested buffer frames are never freed otherwise
+                 break;
+             }
+             case PM4ItOpcode::IncrementDeCounter: {
+@@ -1287,7 +1297,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                 break;
+             }
+             case PM4ItOpcode::WaitOnCeCounter: {
+-                while (cblock.ce_count <= cblock.de_count && !ce_task.handle.done()) {
++                // A submission without a constant buffer has no CE task (null handle).
++                while (cblock.ce_count <= cblock.de_count && ce_task.handle &&
++                       !ce_task.handle.done()) {
+                     RESUME_GFX(ce_task);
+                 }
+                 break;
+@@ -1438,6 +1450,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
+                 YIELD_ASC(vqid);
+                 RESUME_ASC(task, vqid);
+             }
++            task.handle.destroy(); // nested buffer frames are never freed otherwise
+             break;
+         }
+         case PM4ItOpcode::DmaData: {
+diff --git a/gpu/shadps4/video_core/amdgpu/regs.h b/gpu/shadps4/video_core/amdgpu/regs.h
+index 1e79f29..3354be6 100644
+--- a/gpu/shadps4/video_core/amdgpu/regs.h
++++ b/gpu/shadps4/video_core/amdgpu/regs.h
+@@ -168,6 +168,15 @@ union Regs {
+     };
+     std::array<u32, NumRegs> reg_array;
+ 
++    /// Emulator-private word (no hardware register lives there): the index count of the last
++    /// INDEX_BUFFER_SIZE packet. Indirect indexed draws size their index buffer from it; it must
++    /// not share num_indices, which every direct draw overwrites. Kept in reg_array so it travels
++    /// with the register snapshots like any other state.
++    static constexpr u32 IndexBufferSizeWord = NumRegs - 1;
++    u32 IndexBufferNumIndices() const {
++        return reg_array[IndexBufferSizeWord];
++    }
++
+     const ShaderProgram* ProgramForStage(u32 index) const {
+         switch (index) {
+         case 0:
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer.cpp b/gpu/shadps4/video_core/buffer_cache/buffer.cpp
 index 6318e26..4c6f530 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer.cpp
@@ -216,7 +438,7 @@ index 6318e26..4c6f530 100644
          ++wait_cursor;
      }
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-index 18476d4..32a2128 100644
+index 18476d4..c5960ae 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 @@ -8,6 +8,9 @@
@@ -399,7 +621,40 @@ index 18476d4..32a2128 100644
      }
      return {arena, arena->Offset(device_addr)};
  }
-@@ -638,8 +774,26 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
+@@ -441,7 +577,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
+             .resourceOffset = (start - base_block) << block_shift,
+             .size = (end - start) << block_shift,
+             .memory = backing.memory,
+-            .memoryOffset = backing.offset + ((start - backing.start) << block_shift),
++            .memoryOffset = (backing.offset + (start - backing.start)) << block_shift,
+         });
+     });
+ 
+@@ -469,7 +605,14 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
+     }
+     BbStats::Timer timer{BbStats::t_resident};
+ 
++    // The arenas are read by shaders through their device address (ARENA_USAGE), so Vulkan
++    // requires every memory block bound into them to be device-addressable as well; without the
++    // flag the driver is free to leave it out of the address mapping (invalid GPU reads).
++    const vk::MemoryAllocateFlagsInfo addressable = {
++        .flags = vk::MemoryAllocateFlagBits::eDeviceAddress,
++    };
+     vk::MemoryAllocateInfo alloc_info = {
++        .pNext = &addressable,
+         .allocationSize = resident_blocks << block_shift,
+         .memoryTypeIndex = arena_memory_type_index,
+     };
+@@ -507,7 +650,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
+         backing.start = range.start;
+         backing.end = range.end;
+         backing.memory = device_memory;
+-        backing.offset = memory_offset;
++        backing.offset = memory_offset >> block_shift; // in blocks, like start/end (Backing)
+         resident_ranges.Add(backing);
+ 
+         LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
+@@ -638,8 +781,26 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
              static constexpr u32 ZmaskUncompressed = 0xf;
              runtime.FillBuffer(arena, arena->Offset(device_addr), size, ZmaskUncompressed);
              return true;
@@ -428,7 +683,7 @@ index 18476d4..32a2128 100644
          }
      }
      // bbport: most texel buffers alias no image; remember misses until images change.
-@@ -727,6 +881,9 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
+@@ -727,6 +888,9 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
  
      info.AddWait(signal_sema, signal_tick);
      auto submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
@@ -1715,6 +1970,19 @@ index d8e35d3..0f33059 100644
  
      const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
      auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
+index 79496d4..33b1b6f 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
+@@ -12,7 +12,7 @@
+ 
+ namespace Serialization {
+ /* You should increment versions below once corresponding serialization scheme is changed. */
+-static constexpr u32 ShaderBinaryVersion = 7u; // bbport: interpolated integer fix (Pascal)
++static constexpr u32 ShaderBinaryVersion = 8u; // 0.3.8: EXEC scope after empty branch, clamped rcp/rsq/log
+ static constexpr u32 ShaderMetaVersion = 7u; // bbport: ImageResource::needs_native
+ static constexpr u32 PipelineKeyVersion = 5u; // bbport: Info layout (ImageResource::needs_native)
+ } // namespace Serialization
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
 index 77df0d0..26ed090 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_presenter.cpp
@@ -2026,7 +2294,7 @@ index 7eaf065..1866655 100644
      vk::UniqueCommandPool command_pool;
      std::vector<Frame> present_frames;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-index c941f6b..bea0734 100644
+index c941f6b..294ce80 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 @@ -3,8 +3,12 @@
@@ -2067,7 +2335,17 @@ index c941f6b..bea0734 100644
          constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
          draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
      }
-@@ -273,6 +286,26 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
+@@ -128,6 +141,9 @@ bool Rasterizer::FilterDraw() {
+         // TODO: check for a valid MRT1 to promote the draw to the resolve pass.
+         LOG_TRACE(Render_Vulkan, "FMask decompression pass skipped");
+         ScopedMarkerInsert("FmaskDecompress");
++        // The skipped pass would also have resolved a pending fast clear: do that, or the
++        // target keeps showing its stale contents.
++        EliminateFastClear();
+         return false;
+     }
+     if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Resolve) {
+@@ -273,6 +289,26 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
      if (upscaler->Enabled() && cb_descs[0].first) {
          upscaler->OnColorTarget(cb_descs[0].first);
      }
@@ -2094,7 +2372,7 @@ index c941f6b..bea0734 100644
      // bbport: scene color: a full-size RGBA16F target drawn with the scene depth.
      if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth() &&
          cb_descs[0].first && std::popcount(key.mrt_mask) <= 2) {
-@@ -408,6 +441,161 @@ bool Rasterizer::OnStageA() const {
+@@ -408,6 +444,161 @@ bool Rasterizer::OnStageA() const {
  namespace {
  /// Stage A: cycles waited per drain site (BB_FRAME_STATS), keyed by function name and line.
  std::unordered_map<const char*, std::unordered_map<u32, u64>> drain_sites;
@@ -2256,7 +2534,7 @@ index c941f6b..bea0734 100644
  } // namespace
  
  void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
-@@ -440,6 +628,10 @@ bool Rasterizer::IsGpuSideThreadId(u32 tid) const {
+@@ -440,6 +631,10 @@ bool Rasterizer::IsGpuSideThreadId(u32 tid) const {
      return tid == liverpool->GetGpuCommandProcessorThreadId();
  }
  
@@ -2267,7 +2545,7 @@ index c941f6b..bea0734 100644
  void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
      if (!draw_pipe || !size) {
          return;
-@@ -960,6 +1152,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
+@@ -960,6 +1155,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
      // target is that frame.
      if (camera_motion->Enabled() && regs.color_buffers[0] &&
          FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
@@ -2277,7 +2555,7 @@ index c941f6b..bea0734 100644
          scene_started = false;
          camera_motion->OnDisplayPass(cb_descs[0].first);
          if (upscaler->OnFrameStart()) {
-@@ -1108,7 +1303,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
+@@ -1108,7 +1306,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
      // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
      // full-screen quad leaves an edge column unwritten).
      draw_jitter = {};
@@ -2288,7 +2566,16 @@ index c941f6b..bea0734 100644
          (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
          draw_jitter = upscaler->Jitter();
      }
-@@ -1240,7 +1437,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+@@ -1215,7 +1415,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
+ 
+     BindVertexBuffers(pipeline);
+     if (is_indexed) {
+-        BindIndexBuffer();
++        BindIndexBuffer(0, true);
+     }
+ 
+     const auto [buffer, base] =
+@@ -1240,7 +1440,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
      push_data.yoffset *= target_scale[1];
      pipeline->BindResources(set_writes, push_data);
      draw_jitter = {};
@@ -2299,7 +2586,7 @@ index c941f6b..bea0734 100644
          draw_jitter = upscaler->Jitter();
      }
      UpdateDynamicState(pipeline, is_indexed);
-@@ -1315,6 +1514,153 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
+@@ -1315,6 +1517,153 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
      if (upscaler->Enabled()) {
          upscaler->OnDispatch(cs.pgm_hash);
      }
@@ -2453,7 +2740,7 @@ index c941f6b..bea0734 100644
      if (ExecuteShaderHLE(cs, Regs(), cs_program, *this)) {
          return;
      }
-@@ -1336,6 +1682,34 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
+@@ -1336,6 +1685,34 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
      if (FrameCapture::Active()) {
          FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
      }
@@ -2488,7 +2775,60 @@ index c941f6b..bea0734 100644
      scheduler.Record([=](vk::CommandBuffer cmdbuf) {
          cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
          cmdbuf.dispatch(dim_x, dim_y, dim_z);
-@@ -2388,6 +2762,24 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
+@@ -1840,8 +2217,8 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
+     v.num_buffers = static_cast<u32>(guest_buffers.size());
+ }
+ 
+-void Rasterizer::BindIndexBuffer(u32 index_offset) {
+-    ResolveIndexBuffer(index_offset);
++void Rasterizer::BindIndexBuffer(u32 index_offset, bool is_indirect) {
++    ResolveIndexBuffer(index_offset, is_indirect);
+     EmitIndexBuffer();
+ }
+ 
+@@ -1852,7 +2229,7 @@ void Rasterizer::EmitIndexBuffer() {
+     });
+ }
+ 
+-void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
++void Rasterizer::ResolveIndexBuffer(u32 index_offset, bool is_indirect) {
+     const auto& regs = Regs();
+ 
+     // Figure out index type and size.
+@@ -1860,10 +2237,16 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
+     const vk::IndexType index_type = is_index16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32;
+     const u32 index_size = is_index16 ? sizeof(u16) : sizeof(u32);
+     const VAddr index_address =
+-        regs.index_base_address.Address<VAddr>() + index_offset * index_size;
++        regs.index_base_address.Address<VAddr>() + u64{index_offset} * index_size;
+ 
+-    // Bind index buffer.
+-    const u32 index_buffer_size = regs.num_indices * index_size;
++    // Bind index buffer. An indirect draw takes its index count from the GPU, so the buffer
++    // covers the whole INDEX_BUFFER_SIZE range; num_indices may belong to an earlier direct draw
++    // and be too small (the GPU would then read indices nobody uploaded).
++    u32 num_indices = regs.num_indices;
++    if (is_indirect && regs.IndexBufferNumIndices() != 0) {
++        num_indices = regs.IndexBufferNumIndices();
++    }
++    const u32 index_buffer_size = num_indices * index_size;
+     const auto [buffer, offset] =
+         buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
+     needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
+@@ -2056,7 +2439,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
+             if (desc.buffer_type == Shader::BufferType::GdsBuffer) {
+                 const auto* gds_buf = buffer_cache.GetGdsBuffer();
+                 buffer_infos.emplace_back(gds_buf->Handle(), 0, gds_buf->SizeBytes());
+-                needs_barrier |= runtime.IsBufferAccessed(gds_buf, 0, gds_buf->SizeBytes());
++                // Track GDS like any other bound buffer: shader writes to it must be seen by
++                // later copies/fills, and a write after an earlier read needs a barrier too.
++                needs_barrier |= runtime.IsBufferAccessed(gds_buf, 0, gds_buf->SizeBytes(),
++                                                          desc.is_written);
++                bound_buffers.emplace_back(gds_buf, 0, gds_buf->SizeBytes(), desc.is_written);
+             } else if (desc.buffer_type == Shader::BufferType::Flatbuf) {
+                 auto& vk_buffer = buffer_cache.GetStreamBuffer();
+                 const u32 ubo_size = stage.FlatUserData().size() * sizeof(u32);
+@@ -2388,6 +2775,24 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
              bound_images.emplace_back(image_id);
  
              auto& image = texture_cache.GetImage(image_id);
@@ -2513,7 +2853,7 @@ index c941f6b..bea0734 100644
              auto& image_view = texture_cache.FindTexture(
                  image_id, desc, memo_entry ? &memo_entry->view_memo : nullptr, !on_helper);
              const auto binding = image.binding;
-@@ -2971,6 +3363,35 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
+@@ -2971,6 +3376,35 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
          state.num_layers = 1;
      }
  
@@ -2550,7 +2890,7 @@ index c941f6b..bea0734 100644
          // Half-resolution passes keep the scene's factor (proxy / native = scene / 1920).
          const auto size = scene_targets->Size();
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
-index b1ff8b9..ac1f992 100644
+index b1ff8b9..00f290b 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
 @@ -121,6 +121,8 @@ public:
@@ -2562,8 +2902,23 @@ index b1ff8b9..ac1f992 100644
      /// Before a guest-visible write: fences deferred earlier are written first.
      void WaitDeferredSignals() {
          scheduler.WaitDeferredSignals();
+@@ -297,12 +299,12 @@ private:
+     bool SkipOutputlessDraw(const GraphicsPipeline* pipeline);
+     void BindVertexBuffers(const GraphicsPipeline* pipeline,
+                            const PreparedDraw* prepared = nullptr);
+-    void BindIndexBuffer(u32 index_offset = 0);
++    void BindIndexBuffer(u32 index_offset = 0, bool is_indirect = false);
+     /// bbport: BindVertexBuffers/BindIndexBuffer in two halves: obtaining the buffers
+     /// (vertex_binds, index_bind) and recording the binds.
+     void ResolveVertexBuffers(const GraphicsPipeline* pipeline, const PreparedDraw* prepared);
+     void EmitVertexBuffers();
+-    void ResolveIndexBuffer(u32 index_offset);
++    void ResolveIndexBuffer(u32 index_offset, bool is_indirect = false);
+     void EmitIndexBuffer();
+ 
+     void ResetBindings(bool is_compute);
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.cpp
-index df4887d..34e428d 100644
+index df4887d..7c1b496 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.cpp
 @@ -1,6 +1,7 @@
@@ -2574,7 +2929,21 @@ index df4887d..34e428d 100644
  #include <boost/container/small_vector.hpp>
  #include "bbport_toggles.h"
  #include "video_core/buffer_cache/buffer.h"
-@@ -533,8 +534,35 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
+@@ -506,8 +507,11 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
+ 
+ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
+     if (src->info.num_samples == 1 && dst->info.num_samples == 1) {
+-        if (instance.IsMaintenance8Supported() ||
+-            src->info.props.is_depth == dst->info.props.is_depth) {
++        // vkCmdCopyImage needs matching aspects: D32 <-> D32S8 (depth vs depth+stencil) goes
++        // through the buffer path too, a direct copy can lose the device.
++        if ((instance.IsMaintenance8Supported() ||
++             src->info.props.is_depth == dst->info.props.is_depth) &&
++            src->aspect_mask == dst->aspect_mask) {
+             CopyImage(src, dst);
+         } else {
+             // Perform depth from/to color copy using the intermediate copy buffer.
+@@ -533,8 +537,35 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
          blit_helper->ReinterpretColorAsMsDepth(
              dst->info.size.width, dst->info.size.height, dst->info.num_samples,
              src->info.pixel_format, dst->info.pixel_format, src->GetImage(), dst->GetImage());
@@ -2612,7 +2981,7 @@ index df4887d..34e428d 100644
  }
  
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
-index c72df59..ca738d9 100644
+index c72df59..b7e9e4e 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
 @@ -20,6 +20,7 @@
@@ -2640,15 +3009,43 @@ index c72df59..ca738d9 100644
  
      // Invalidate dynamic state so it gets applied to the new command buffer.
      dynamic_state.Invalidate();
-@@ -421,6 +425,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
+@@ -421,14 +425,33 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
      SyncRecording();
      // Guest memory copies into staging read by this submission (copy threads).
      WaitHostCopies();
++    // The CPU reads GPU results (readbacks, auto-exposure data) once this submission's fence
++    // or semaphore signals. Vulkan only makes device writes visible to the host through a
++    // barrier into the host stage, so every batch ends with one.
++    const vk::MemoryBarrier2 to_host = {
++        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
++        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
++        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
++        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
++    };
++    current_cmdbuf.pipelineBarrier2(vk::DependencyInfo{
++        .memoryBarrierCount = 1,
++        .pMemoryBarriers = &to_host,
++    });
 +    Breadcrumbs::End(current_cmdbuf, Breadcrumbs::Submit0 + marker_index);
      Check(current_cmdbuf.end());
  
      const vk::Semaphore timeline = work_semaphore.Handle();
-@@ -451,6 +456,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
+     info.AddSignal(timeline, signal_value);
+ 
+-    static constexpr std::array<vk::PipelineStageFlags, 2> wait_stage_masks = {
++    // One mask per possible wait (SubmitInfo holds up to 4; two entries were read past the end).
++    // Every wait blocks all stages: the present blit reads the frame in the transfer stage, so
++    // colour-output-only was not enough for the frame-ready wait.
++    static constexpr std::array<vk::PipelineStageFlags, 4> wait_stage_masks = {
++        vk::PipelineStageFlagBits::eAllCommands,
++        vk::PipelineStageFlagBits::eAllCommands,
++        vk::PipelineStageFlagBits::eAllCommands,
+         vk::PipelineStageFlagBits::eAllCommands,
+-        vk::PipelineStageFlagBits::eColorAttachmentOutput,
+     };
+ 
+     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
+@@ -451,6 +474,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
  
      ImGui::Core::TextureManager::Submit();
      auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
@@ -3774,11 +4171,50 @@ index 5855a5c..c577d0d 100644
      std::vector<MsPipeline> ms_image_copy_pl;
  };
  
+diff --git a/gpu/shadps4/video_core/texture_cache/image_view.cpp b/gpu/shadps4/video_core/texture_cache/image_view.cpp
+index 06d7e8c..7235f7c 100644
+--- a/gpu/shadps4/video_core/texture_cache/image_view.cpp
++++ b/gpu/shadps4/video_core/texture_cache/image_view.cpp
+@@ -142,6 +142,15 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
+         }
+     }
+ 
++    if (!IsViewTypeCompatible(info.type, image.info.type)) {
++        // An incompatible view type is invalid Vulkan (undefined behaviour on the GPU): view the
++        // image as its own type instead.
++        LOG_ERROR(Render_Vulkan, "image view type {} is incompatible with image type {}, using {}",
++                  magic_enum::enum_name(info.type), magic_enum::enum_name(image.info.type),
++                  magic_enum::enum_name(image.info.type));
++        info.type = image.info.type;
++    }
++
+     const vk::ImageViewCreateInfo image_view_ci = {
+         .pNext = &usage_ci,
+         .image = image.GetImage(),
+@@ -156,10 +165,6 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
+             .layerCount = info.range.extent.layers,
+         },
+     };
+-    if (!IsViewTypeCompatible(info.type, image.info.type)) {
+-        LOG_ERROR(Render_Vulkan, "image view type {} is incompatible with image type {}",
+-                  magic_enum::enum_name(info.type), magic_enum::enum_name(image.info.type));
+-    }
+ 
+     auto [view_result, view] = instance.GetDevice().createImageViewUnique(image_view_ci);
+     ASSERT_MSG(view_result == vk::Result::eSuccess, "Failed to create image view: {}",
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-index 9692547..4b27efa 100644
+index 9692547..41b056a 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-@@ -99,6 +99,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
+@@ -14,6 +14,7 @@
+ #include "core/memory.h"
+ #include "video_core/buffer_cache/buffer_cache.h"
+ #include "video_core/page_manager.h"
++#include "video_core/renderer_vulkan/liverpool_to_vk.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_runtime.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+@@ -99,6 +100,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
      };
      runtime.DownloadImage(&image, download.buffer, std::span{&image_download, 1});
      if (sync) {
@@ -3786,6 +4222,68 @@ index 9692547..4b27efa 100644
          scheduler.Finish();
          download.Invalidate();
          Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
+@@ -245,6 +247,13 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
+         // Inherit image usage
+         auto& new_image = slot_images[new_image_id];
+         new_image.usage = old_image.usage;
++        // Layers/mips the old image did not have get no copy below: load them from guest memory
++        // first instead of leaving them uninitialised (garbage or NaN depth).
++        if (new_info.num_samples == 1 &&
++            (new_info.resources.layers > old_image.info.resources.layers ||
++             new_info.resources.levels > old_image.info.resources.levels)) {
++            RefreshImage(new_image);
++        }
+         new_image.flags &= ~ImageFlagBits::Dirty;
+         // When creating a depth buffer through overlap resolution don't clear it on first use.
+         new_image.info.meta_info.htile_clear_mask = 0;
+@@ -498,6 +507,11 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
+ 
+     RefreshImage(new_image);
+     runtime.CopyImage(&src_image, &new_image);
++    // The copy holds the newest contents. Keep the source's GPU-written state and usage, or a
++    // later CPU write to these pages would re-upload stale guest memory over the GPU result.
++    new_image.flags &= ~ImageFlagBits::Dirty;
++    new_image.flags |= src_image.flags & ImageFlagBits::GpuModified;
++    new_image.usage = src_image.usage;
+ 
+     if (src_image.binding.is_bound || src_image.binding.is_target) {
+         src_image.binding.needs_rebind = 1u;
+@@ -748,11 +762,18 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
+     }
+ 
+     // If there is a stencil attachment, link depth and stencil.
+-    if (desc.info.stencil_addr != 0) {
++    // A stencil address equal to the depth address is the depth image itself, not a plane.
++    if (desc.info.stencil_addr != 0 && desc.info.stencil_addr != desc.info.guest_address) {
+         ImageId stencil_id{};
+         ForEachImageInRegion(desc.info.stencil_addr, desc.info.stencil_size,
+                              [&](ImageId image_id, Image& image) {
+-                                 if (image.info.guest_address == desc.info.stencil_addr) {
++                                 // Only a stencil placeholder or a stencil-capable image is the
++                                 // plane; a colour image reusing that memory must not be linked
++                                 // (its reads/writes would be redirected into the D32S8 image).
++                                 const auto fmt = image.info.pixel_format;
++                                 if (image.info.guest_address == desc.info.stencil_addr &&
++                                     (fmt == vk::Format::eUndefined ||
++                                      Vulkan::LiverpoolToVK::IsFormatStencilCompatible(fmt))) {
+                                      stencil_id = image_id;
+                                  }
+                              });
+diff --git a/gpu/shadps4/video_core/texture_cache/tile_manager.cpp b/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
+index 47ee198..97aed3c 100644
+--- a/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
++++ b/gpu/shadps4/video_core/texture_cache/tile_manager.cpp
+@@ -329,6 +329,10 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
+     RecordTilingDispatch(GetTilingPipeline(info, true), tiled_buffer_info, linear_buffer_info,
+                          params_buffer_info, dim_x);
+ 
++    // The dispatch reads the staging range: reusing it later needs a write-after-read barrier.
++    runtime.AccessBuffer(staging.buffer, staging.offset, info.guest_size,
++                         vk::PipelineStageFlagBits2::eComputeShader,
++                         vk::AccessFlagBits2::eShaderRead);
+     runtime.AccessBuffer(out_buffer, out_offset, info.guest_size,
+                          vk::PipelineStageFlagBits2::eComputeShader,
+                          vk::AccessFlagBits2::eShaderWrite);
 diff --git a/gpu/shim/bbgpu.cpp b/gpu/shim/bbgpu.cpp
 index 494d151..85c8231 100644
 --- a/gpu/shim/bbgpu.cpp
@@ -4284,12 +4782,6 @@ index 2e19d49..d234bb3 100644
          user.player_index = 1;
          user.logged_in = true;
          user.shadnet_npid = text("BB_SHADNET_NPID", "");
-diff --git a/gpu/third_party/fsr-vulkan b/gpu/third_party/fsr-vulkan
---- a/gpu/third_party/fsr-vulkan
-+++ b/gpu/third_party/fsr-vulkan
-@@ -1 +1 @@
--Subproject commit c64f093404125e960813f95f1996c14780f0dd69
-+Subproject commit c64f093404125e960813f95f1996c14780f0dd69-dirty
 diff --git a/packaging/windows/bb-probe.rc b/packaging/windows/bb-probe.rc
 index 46d615e..a980e63 100644
 --- a/packaging/windows/bb-probe.rc
@@ -5298,7 +5790,7 @@ index 0000000..024c6a6
 +{"zr094EQ39Ww","__cxa_pure_virtual"},
 +{"zwY0YV91TTI","sceGnmSubmitCommandBuffers"},
 diff --git a/src/probe.c b/src/probe.c
-index 07344eb..f5b01d3 100644
+index 07344eb..e412282 100644
 --- a/src/probe.c
 +++ b/src/probe.c
 @@ -13,6 +13,7 @@
@@ -5449,6 +5941,28 @@ index 07344eb..f5b01d3 100644
          gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
          if (bbgpu_init(&gpu)) fail("GPU initialization failed");
          printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,bbgpu_symbol_count());
+@@ -697,7 +780,20 @@ int main(int argc, char **argv) {
+     bbnet_initialize(); /* the online session starts with the game */
+     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
+     entered_game=1;
+-    struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};
++    /* DC_GAME_ARGS="-a b": extra words for the game's own command line after argv[0]
++       (DRIVECLUB reads developer switches such as -resolutionscale from it). */
++    enum { MAX_GAME_ARGS=16 };
++    struct { uint64_t argc; const char *argv[MAX_GAME_ARGS+2]; } params = {1, {"/app0/eboot.bin", NULL}};
++    static char game_args[512];
++    const char *extra=getenv("DC_GAME_ARGS");
++    if (extra && *extra) {
++        snprintf(game_args,sizeof game_args,"%s",extra);
++        for (char *word=strtok(game_args," \t"); word && params.argc<=MAX_GAME_ARGS; word=strtok(NULL," \t")) {
++            printf("Game argument %" PRIu64 ": %s\n",params.argc,word);
++            params.argv[params.argc++]=word;
++        }
++        params.argv[params.argc]=NULL;
++    }
+ #ifdef _WIN32
+     typedef void (ABI *Entry)(void *, void (ABI *)(void));
+     ((Entry)(image + entry))(&params, guest_exit);
 diff --git a/src/runtime.c b/src/runtime.c
 index 25865ae..005a9d4 100644
 --- a/src/runtime.c

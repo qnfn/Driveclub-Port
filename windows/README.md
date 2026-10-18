@@ -7,6 +7,13 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.4.0
+
+- **The mid-race "Device lost" crash is fixed** in testing (RX 6750 XT, RX 9070 XT, Intel CPUs: several races, no crash). The game's memory that shaders read through GPU pointers was not allocated as GPU-addressable, so the GPU sometimes read an invalid address ("invalid read at GPU address ...").
+- **About 20 more GPU fixes** from shadPS4 and GR2fork, rewritten for DCport: index buffers sized correctly for indirect draws, safe copies between depth formats, missing GPU/CPU synchronisation (the CPU now sees GPU results before reading them), stencil and image-view fixes, clamped GPU math (no Inf/NaN), a command-processor crash and hang, a memory leak in long sessions, and an event-queue race. The shader cache is rebuilt once (short stutters in the first race).
+- **SETUP > Render 1440p / 4K is back**, now with the game's own resolution setting, so the whole picture renders at that size (the old 1080p square is gone). **Warning:** the resolution patches it needs have visual errors DCport cannot fix, for example broken clouds in the sky. **1080p is recommended**: best picture, most stable.
+- **Known issue: dim picture or flickering light** (most visible when night turns to day). If it happens, restart the game; if it still happens, send the log (LOG tab). We tried to make it happen again on our side but did not succeed, so logs help.
+
 ## 0.3.7
 
 - **Fewer "Device lost" crashes.** The crash right after a car loads is gone in testing (RX 9070 XT): the "Object motion" pass, left over from the runtime DCport is built on, is off in DRIVECLUB (its FSR takes the motion from the game itself), and threaded recording is off by default (SETUP > Threading > On turns it on).

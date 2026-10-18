@@ -22,6 +22,8 @@ GLYPHS = {"ok": "✓", "warn": "⚠", "bad": "✕"}
 DEFAULT_SHARPNESS = 0.30  # the runtime's value when dcport.ini has none
 WINDOW_CHOICES = tuple((f"{w}x{h}", "4K" if h == 2160 else f"{h}p")
                        for w, h in patches.WINDOW_SIZES)
+RENDER_CHOICES = tuple((r.key, r.label + (" (best)" if r.key == patches.DEFAULT_RESOLUTION
+                                           else "")) for r in patches.RESOLUTIONS)
 THREADING_CHOICES = (("auto", "Auto"), ("1", "On"), ("0", "Off"))
 THREADING_NOTE = ("Threading: the game's GPU work is prepared on extra threads. It gives more FPS "
                   "but can crash mid-race, so Auto keeps it off (as Off does); On turns it on. "
@@ -41,6 +43,10 @@ def threading_value(ini: dict) -> str:
 
 RENDER_NOTE = ("The game renders at 1080p; on a bigger window or screen the picture is scaled "
                "up to it with FSR 1 and sharpened (FSR edition).")
+RENDER_HIGH_NOTE = ("Warning: {label} uses the community resolution patches, and they have "
+                    "visual errors DCport cannot fix (for example broken clouds in the sky). "
+                    "1080p is recommended: it looks best and is the most stable. {label} also "
+                    "needs a strong GPU and more video memory. Applies on the next PLAY.")
 
 
 class SetupPage(tk.Frame):
@@ -172,16 +178,21 @@ class SetupPage(tk.Frame):
         self.size_choice = theme.Segmented(grid, app, WINDOW_CHOICES, self.set_window_size,
                                            min_label="1080p")
         self.size_choice.grid(row=1, column=1, sticky="w", pady=(app.px(10), 0))
-        theme.text_label(grid, app, "FPS counter").grid(row=2, column=0, sticky="w",
+        theme.text_label(grid, app, "Render").grid(row=2, column=0, sticky="w",
+                                                   pady=(app.px(10), 0))
+        self.render_choice = theme.Segmented(grid, app, RENDER_CHOICES, self.set_render_res,
+                                             min_label="1440p")
+        self.render_choice.grid(row=2, column=1, sticky="w", pady=(app.px(10), 0))
+        theme.text_label(grid, app, "FPS counter").grid(row=3, column=0, sticky="w",
                                                         pady=(app.px(10), 0))
         self.counter_choice = theme.Segmented(grid, app, ((True, "On"), (False, "Off")),
                                               self.set_fps_counter, min_label="Fullscreen")
-        self.counter_choice.grid(row=2, column=1, sticky="w", pady=(app.px(10), 0))
-        theme.text_label(grid, app, "Threading").grid(row=3, column=0, sticky="w",
+        self.counter_choice.grid(row=3, column=1, sticky="w", pady=(app.px(10), 0))
+        theme.text_label(grid, app, "Threading").grid(row=4, column=0, sticky="w",
                                                       pady=(app.px(10), 0))
         self.threading_choice = theme.Segmented(grid, app, THREADING_CHOICES, self.set_threading,
                                                 min_label="Fullscreen")
-        self.threading_choice.grid(row=3, column=1, sticky="w", pady=(app.px(10), 0))
+        self.threading_choice.grid(row=4, column=1, sticky="w", pady=(app.px(10), 0))
         self.threading_note = theme.text_label(card, app, THREADING_NOTE, font="small",
                                                fg="muted")
         self._wrapping(self.threading_note, card).pack(fill="x", pady=(app.px(12), 0))
@@ -278,6 +289,12 @@ class SetupPage(tk.Frame):
         self.size_choice.set(f"{w}x{h}")
         for value, _ in WINDOW_CHOICES:  # fullscreen covers the monitor
             self.size_choice.set_enabled(value, not s.fullscreen)
+        render = patches.resolution(s.render_res)
+        self.render_choice.set(render.key)
+        high = render.key != patches.DEFAULT_RESOLUTION
+        self.render_note.configure(
+            text=RENDER_HIGH_NOTE.format(label=render.label) if high else RENDER_NOTE,
+            fg=app.palette["warn" if high else "muted"])
         self.counter_choice.set(app.fps_counter_on())
         self.threading_choice.set(threading_value(app.game_ini()))
         if self.upscaler_choice is not None:
@@ -419,6 +436,11 @@ class SetupPage(tk.Frame):
     def set_window_size(self, value: str) -> None:
         self.app.settings.window_size = value
         self._saved(self.app.save_settings())
+
+    def set_render_res(self, value: str) -> None:
+        self.app.settings.render_res = value
+        self._saved(self.app.save_settings())
+        self.refresh_session()
 
     def set_fps_counter(self, on: bool) -> None:
         self._show_status(self.app.update_game_ini({"show_fps": "1" if on else "0"}) or "")

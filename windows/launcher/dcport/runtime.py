@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dcport.ini import read_ini
 from dcport.paths import AppPaths
-from dcport.patches import dmem_mb, window_size
+from dcport.patches import dmem_mb, game_args, window_size
 from dcport.settings import LauncherSettings
 
 FPS_PRESETS = (30, 60, 75, 90, 120, 144)
@@ -109,6 +109,14 @@ def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
         "BB_USER_NAME": player_name(paths),
         "DC_LANGUAGE": game_language(paths),
     })
+    # dcport.ini readbacks=1 (relaxed) / 2 (precise): the game reads GPU results exactly when it
+    # asks, slower; the default 0 copies them back once per frame (diagnosing the flicker).
+    readbacks = _ini_value(paths, "readbacks", "0")
+    if readbacks in ("1", "2"):
+        env["BB_READBACKS"] = readbacks
+    env.pop("DC_GAME_ARGS", None)
+    if args := game_args(s):
+        env["DC_GAME_ARGS"] = args
     # dcport.ini threaded_recording=0/1 (SETUP > Threading); Auto (anything else) lets the
     # runtime decide: off (it can crash mid-race).
     env.pop("BB_THREADED_RECORDING", None)

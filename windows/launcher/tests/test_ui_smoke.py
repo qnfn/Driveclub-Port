@@ -371,7 +371,7 @@ def test_run_task_reports_on_the_ui_thread(tmp_path):
 
 
 def test_version_and_bundled_resources(monkeypatch, tmp_path):
-    assert dcport.__version__ == "0.3.7"
+    assert dcport.__version__ == "0.4.0"
     assert theme.default_controls() == DEFAULT_INPUT.resolve()
     assert theme.assets_dir() == DEFAULT_INPUT.resolve().parent / "assets"
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
@@ -1075,6 +1075,23 @@ def test_setup_threading_switch_shows_the_choice(tmp_path):
             page.set_threading(value)
             assert page.threading_choice.value == value
             assert read_ini(paths.ini)["threaded_recording"] == value
+    finally:
+        app.destroy()
+
+
+def test_setup_render_resolution_saves_and_warns_above_1080p(tmp_path):
+    paths, _ = configured_port(tmp_path, prepared=True)
+    app = App(paths, fsr=True)
+    try:
+        app.show("setup"); page = app.pages["setup"]
+        assert page.render_choice.value == "1080p"
+        page.set_render_res("1440p")
+        assert app.settings.render_res == "1440p" and page.render_choice.value == "1440p"
+        assert "1440p" in page.render_note.cget("text")
+        page.set_render_res("2160p")
+        assert page.render_choice.value == "2160p" and "4K" in page.render_note.cget("text")
+        page.set_render_res("1080p")
+        assert "FSR 1" in page.render_note.cget("text")
     finally:
         app.destroy()
 
