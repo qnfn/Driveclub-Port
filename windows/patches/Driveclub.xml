@@ -517,7 +517,7 @@
     </Metadata>
     <Metadata Title="Driveclub"
               Name="Unlock All Cars and Bikes"
-              Note="Turns on the game's developer option unlockAll: every car and bike, the club and Driver Level ones too. From the GoldHEN patch repository."
+              Note="Turns on the game's own unlockAll option."
               Author="illusion"
               PatchVer="1.0"
               AppVer="01.28"

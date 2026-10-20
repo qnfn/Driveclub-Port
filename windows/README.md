@@ -11,7 +11,7 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 
 - **Newer runtime, thanks to shadPS4 and bbport:** DCport now builds on [bbport](https://github.com/Supermedo/bloodborne_pc) 1.9.2 by Supermedo (on deadinside28's native runtime) and its contributors, which includes [shadPS4](https://github.com/shadps4-emu/shadPS4)'s 0.20.1 GPU code. This brings shadPS4's renderer fixes, bbport's memory fixes for 4–8 GB graphics cards and less CPU time per draw (by emurphy04). Their work, not ours: we merged it with the Driveclub changes. Not all of it is tested with Driveclub yet. The shader cache is rebuilt once, so the first race stutters a little.
 - **Fewer stutters in races:** the texture cache now follows the graphics card's real memory budget. Before, a 12 GB card started throwing textures out at about 5.5 GB and loaded them again mid-race (short hitches).
-- **All cars and bikes (PATCHES > Garage, off by default):** turns on the game's own `unlockAll` option. Every car and bike is available, also the club cars that needed the DRIVECLUB server (closed in 2020) and the Driver Level ones. Patch by illusion (GoldHEN patch repository).
+- **All cars and bikes (PATCHES > Garage, off by default):** turns on the game's own `unlockAll` option.
 - **Frame-rate patch moved to SETUP > Frame rate** (Deltatime or Fixed tick), next to the frame rate it belongs to.
 - **Threading (SETUP)** ran without crashes in our tests of 0.4.2. It stays Auto (off) by default; turn it On for more FPS, and set it back to Auto if a race ends in a crash.
 - **Better crash reports:** after a "Device lost", the log now names what was at the GPU address that faulted (a live or freed buffer or image, or which game-memory area and whether it was loaded). Please send the log (LOG tab) with any crash.
@@ -145,7 +145,7 @@ DCport is built on other people's work: the native PS4 runtime by deadinside28 a
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4):** renderer, shader recompiler and libraries the runtime is built on.
 - **[akitaonrails](https://github.com/akitaonrails/shadPS4):** shadPS4 investigation of Driveclub (MSAA depth resolve).
 - **Also used:** [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) and the AMD FidelityFX SDK (FSR, FSR 3 frame generation), FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX); [dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv) (MIT) and [SPIRV-Tools](https://github.com/KhronosGroup/SPIRV-Tools) (Apache 2.0) for the FSR 4.1.1 set-up; FreeType, SDL3, FFmpeg and the other libraries listed in `licenses/`.
-- **Community patches** ([shadps4-emu/ps4_cheats](https://github.com/shadps4-emu/ps4_cheats)): illusion, u/Charlie_Muggins, kalaposfos; "Unlock All Cars and Bikes" by illusion ([GoldHEN patch repository](https://github.com/GoldHEN/GoldHEN_Patch_Repository)).
+- **Community patches** ([shadps4-emu/ps4_cheats](https://github.com/shadps4-emu/ps4_cheats)): illusion, u/Charlie_Muggins, kalaposfos; "Unlock All Cars and Bikes" by illusion.
 - Windows port by **qnfn** (system functions, fonts, readbacks, upscaler integration, launcher).
 
 ## Legal disclaimer
