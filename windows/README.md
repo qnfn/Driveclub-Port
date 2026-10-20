@@ -9,7 +9,7 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 
 ## 0.4.2
 
-- **Newer runtime:** DCport now builds on the native PS4 runtime 1.9.2 and its updated shadPS4 GPU layer (0.20.1): many renderer fixes, memory fixes for 4–8 GB graphics cards, and less CPU time per draw. The shader cache is rebuilt once, so the first race stutters a little.
+- **Newer runtime, thanks to shadPS4 and bbport:** DCport now builds on [bbport](https://github.com/Supermedo/bloodborne_pc) 1.9.2 by Supermedo (on deadinside28's native runtime) and its contributors, which includes [shadPS4](https://github.com/shadps4-emu/shadPS4)'s 0.20.1 GPU code. This brings shadPS4's renderer fixes, bbport's memory fixes for 4–8 GB graphics cards and less CPU time per draw (by emurphy04). Their work, not ours: we merged it with the Driveclub changes. Not all of it is tested with Driveclub yet. The shader cache is rebuilt once, so the first race stutters a little.
 - **Fewer stutters in races:** the texture cache now follows the graphics card's real memory budget. Before, a 12 GB card started throwing textures out at about 5.5 GB and loaded them again mid-race (short hitches).
 - **All cars and bikes (PATCHES > Garage, off by default):** turns on the game's own `unlockAll` option. Every car and bike is available, also the club cars that needed the DRIVECLUB server (closed in 2020) and the Driver Level ones. Patch by illusion (GoldHEN patch repository).
 - **Frame-rate patch moved to SETUP > Frame rate** (Deltatime or Fixed tick), next to the frame rate it belongs to.
