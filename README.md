@@ -16,6 +16,7 @@ This is the Windows backend of [Driveclub Native](https://github.com/BlackLineIn
 - **Save profiles**: separate careers for different players, switch any time
 - **Save backups**: dated backups per profile with one-click restore (the current save is backed up first)
 - **All DLC**: tours, cars and DRIVECLUB BIKES from your own DLC dumps
+- **All cars and bikes** (optional patch): the club cars that needed the DRIVECLUB server, and the Driver Level ones
 - **Launcher**: light and dark theme, keyboard and controller rebinding, desktop shortcut and Add to Steam (start the launcher or the game directly, great for Big Picture)
 - **Native**: the game's own code runs directly on your CPU; no emulator, no console window
 
