@@ -1228,7 +1228,7 @@ index 0000000..d10b6c4
 +} // namespace Breadcrumbs
 +} // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
-index 2c70bba..67e3376 100644
+index 2c70bba..ff2041b 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
 @@ -133,7 +133,7 @@ struct Fsr4Upscaler::Impl {
@@ -1259,19 +1259,23 @@ index 2c70bba..67e3376 100644
              return false;
          }
          if (!fsr411) {
-@@ -263,7 +266,10 @@ struct Fsr4Upscaler::Impl {
+@@ -262,8 +265,13 @@ struct Fsr4Upscaler::Impl {
+         g.reset = f.reset;
          g.auto_exposure = f.auto_exposure;
          if (!fsr411->Record(g)) {
-             // Missing assets are permanent for this session; the menu shows the reason.
+-            // Missing assets are permanent for this session; the menu shows the reason.
 -            Fail("FSR 4.1.1: " + fsr411->Error(), fsr411->Error().starts_with("missing"));
++            // Missing assets and an output beyond its model (wider than 3840, e.g. 5120x1440
++            // ultrawide) are permanent for this session: FSR 3.1 takes over. The menu shows why.
 +            const bool missing = fsr411->Error().starts_with("missing");
++            const bool size = fsr411->Error().starts_with("unsupported size");
 +            Fail("FSR 4.1.1: " + fsr411->Error() +
 +                     (missing ? " (set it up in the launcher: SETUP, Set up FSR 4.1.1)" : ""),
-+                 missing);
++                 missing || size);
              return false;
          }
          fsr411_ticks.push_back(scheduler.CurrentTick());
-@@ -383,6 +389,10 @@ Fsr4Upscaler::Fsr4Upscaler(const Instance& instance, Scheduler& scheduler)
+@@ -383,6 +391,10 @@ Fsr4Upscaler::Fsr4Upscaler(const Instance& instance, Scheduler& scheduler)
  
  Fsr4Upscaler::~Fsr4Upscaler() = default;
  

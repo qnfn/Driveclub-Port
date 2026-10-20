@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dcport.ini import read_ini
 from dcport.paths import AppPaths
-from dcport.patches import dmem_mb, game_args, window_size
+from dcport.patches import dmem_mb, game_args, window
 from dcport.settings import LauncherSettings
 
 FPS_PRESETS = (30, 60, 75, 90, 120, 144)
@@ -104,7 +104,7 @@ def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
         "BB_DRAW_PIPE": "1",
         "BB_PREP_WORKERS": "0",
         "BB_FULLSCREEN": "1" if s.fullscreen else "0",
-        "BB_WINDOW_SIZE": "{}x{}".format(*window_size(s.window_size)),
+        "BB_WINDOW_SIZE": "{}x{}".format(*window(s)),
         "BB_DMEM_MB": str(dmem_mb(s)),
         "BB_USER_NAME": player_name(paths),
         "DC_LANGUAGE": game_language(paths),

@@ -7,6 +7,13 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.4.3
+
+- **Ultrawide monitors (21:9 and 32:9).** SETUP > Display has a new **Aspect ratio** choice (16:9 / 21:9 / 32:9) and a **Field of view** slider. The game renders its 3D scene at the full wide size (2560x1080 or 3440x1440 for 21:9, 3840x1080 or 5120x1440 for 32:9), not a stretched 16:9 picture, and the camera matches the screen, so cars and wheels keep their shape. The HUD and menus stay in the middle 16:9 area. Requested by @marcelofis (#1).
+- **Field of view** applies to every camera, cockpit and chase included. The default is 0.65 (the community wide-FOV value, tested on 32:9). 0.50 is the original 16:9 view; higher shows more at the sides and stretches the edges more.
+- **The launcher checks your monitor:** on an ultrawide screen it tells you which aspect ratio to pick (main page and SETUP).
+- At a wide aspect ratio, Render 4K uses 1440 lines. 5120x1440 is wider than FSR 4.1.1 supports, so FSR 3.1 is used there.
+
 ## 0.4.2
 
 - **Newer runtime, thanks to shadPS4 and bbport:** DCport now builds on [bbport](https://github.com/Supermedo/bloodborne_pc) 1.9.2 by Supermedo (on deadinside28's native runtime) and its contributors, which includes [shadPS4](https://github.com/shadps4-emu/shadPS4)'s 0.20.1 GPU code. This brings shadPS4's renderer fixes, bbport's memory fixes for 4–8 GB graphics cards and less CPU time per draw (by emurphy04). Their work, not ours: we merged it with the Driveclub changes. Not all of it is tested with Driveclub yet. The shader cache is rebuilt once, so the first race stutters a little.
@@ -146,6 +153,7 @@ DCport is built on other people's work: the native PS4 runtime by deadinside28 a
 - **[akitaonrails](https://github.com/akitaonrails/shadPS4):** shadPS4 investigation of Driveclub (MSAA depth resolve).
 - **Also used:** [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) and the AMD FidelityFX SDK (FSR, FSR 3 frame generation), FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX); [dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv) (MIT) and [SPIRV-Tools](https://github.com/KhronosGroup/SPIRV-Tools) (Apache 2.0) for the FSR 4.1.1 set-up; FreeType, SDL3, FFmpeg and the other libraries listed in `licenses/`.
 - **Community patches** ([shadps4-emu/ps4_cheats](https://github.com/shadps4-emu/ps4_cheats)): illusion, u/Charlie_Muggins, kalaposfos; "Unlock All Cars and Bikes" by illusion.
+- **Ultrawide:** after rafidwayne's [Driveclub_Widescreen](https://github.com/rafidwayne/Driveclub_Widescreen) (camera aspect, display width, field of view) and its wide-scene extension in the [Driveclub PC wrapper](https://github.com/ondrejeder/Driveclub-pc-wrapper), both GPL-2.0-or-later; FOV fix value by Kravickas.
 - Windows port by **qnfn** (system functions, fonts, readbacks, upscaler integration, launcher).
 
 ## Legal disclaimer

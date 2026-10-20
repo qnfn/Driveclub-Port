@@ -24,6 +24,7 @@ WINDOW_CHOICES = tuple((f"{w}x{h}", "4K" if h == 2160 else f"{h}p")
                        for w, h in patches.WINDOW_SIZES)
 RENDER_CHOICES = tuple((r.key, r.label + (" (best)" if r.key == patches.DEFAULT_RESOLUTION
                                            else "")) for r in patches.RESOLUTIONS)
+ASPECT_CHOICES = tuple((a, a) for a in patches.ASPECTS)
 TIMING_CHOICES = (("deltatime", "Deltatime"), ("fixed", "Fixed tick"))
 TIMING_NOTES = {
     "deltatime": "Smooth at any frame rate. Its authors note that it breaks a few things; "
@@ -54,6 +55,13 @@ RENDER_HIGH_NOTE = ("Warning: {label} uses the community resolution patches, and
                     "visual errors DCport cannot fix (for example broken clouds in the sky). "
                     "1080p is recommended: it looks best and is the most stable. {label} also "
                     "needs a strong GPU and more video memory. Applies on the next PLAY.")
+
+
+WIDE_NOTE = ("Ultrawide {w}x{h}: the game renders its scene at the full width and the HUD "
+             "stays in the middle 16:9 area. Field of view: {fov:.2f} (0.50 is the 16:9 view, "
+             "{hor:.2f} keeps its height on this screen; higher shows more at the sides but "
+             "stretches the edges). Applies on the next PLAY.")
+WIDE_HIGH_NOTE = " A higher Render is not available at this aspect ratio: it renders {lines} lines."
 
 
 class SetupPage(tk.Frame):
@@ -202,16 +210,32 @@ class SetupPage(tk.Frame):
         self.render_choice = theme.Segmented(grid, app, RENDER_CHOICES, self.set_render_res,
                                              min_label="1440p")
         self.render_choice.grid(row=2, column=1, sticky="w", pady=(app.px(10), 0))
-        theme.text_label(grid, app, "FPS counter").grid(row=3, column=0, sticky="w",
+        theme.text_label(grid, app, "Aspect ratio").grid(row=3, column=0, sticky="w",
+                                                         pady=(app.px(10), 0))
+        self.aspect_choice = theme.Segmented(grid, app, ASPECT_CHOICES, self.set_aspect,
+                                             min_label="1440p")
+        self.aspect_choice.grid(row=3, column=1, sticky="w", pady=(app.px(10), 0))
+        theme.text_label(grid, app, "Field of view").grid(row=4, column=0, sticky="w",
+                                                          pady=(app.px(10), 0))
+        row = self._row(grid)
+        row.grid(row=4, column=1, sticky="we", pady=(app.px(10), 0))
+        self.fov_value = theme.text_label(row, app, "0.66", font="body_bold", width=4,
+                                          anchor="e")
+        self.fov_value.pack(side="right")
+        self.fov = theme.Slider(row, app, length=app.px(140), from_=patches.FOV_MIN,
+                                to=patches.FOV_MAX, on_change=self._fov_moved,
+                                on_commit=self.set_fov)
+        self.fov.pack(side="left", fill="x", expand=True, padx=(0, app.px(10)))
+        theme.text_label(grid, app, "FPS counter").grid(row=5, column=0, sticky="w",
                                                         pady=(app.px(10), 0))
         self.counter_choice = theme.Segmented(grid, app, ((True, "On"), (False, "Off")),
                                               self.set_fps_counter, min_label="Fullscreen")
-        self.counter_choice.grid(row=3, column=1, sticky="w", pady=(app.px(10), 0))
-        theme.text_label(grid, app, "Threading").grid(row=4, column=0, sticky="w",
+        self.counter_choice.grid(row=5, column=1, sticky="w", pady=(app.px(10), 0))
+        theme.text_label(grid, app, "Threading").grid(row=6, column=0, sticky="w",
                                                       pady=(app.px(10), 0))
         self.threading_choice = theme.Segmented(grid, app, THREADING_CHOICES, self.set_threading,
                                                 min_label="Fullscreen")
-        self.threading_choice.grid(row=4, column=1, sticky="w", pady=(app.px(10), 0))
+        self.threading_choice.grid(row=6, column=1, sticky="w", pady=(app.px(10), 0))
         self.threading_note = theme.text_label(card, app, THREADING_NOTE, font="small",
                                                fg="muted")
         self._wrapping(self.threading_note, card).pack(fill="x", pady=(app.px(12), 0))
@@ -318,9 +342,22 @@ class SetupPage(tk.Frame):
         render = patches.resolution(s.render_res)
         self.render_choice.set(render.key)
         high = render.key != patches.DEFAULT_RESOLUTION
-        self.render_note.configure(
-            text=RENDER_HIGH_NOTE.format(label=render.label) if high else RENDER_NOTE,
-            fg=app.palette["warn" if high else "muted"])
+        note = RENDER_HIGH_NOTE.format(label=render.label) if high else RENDER_NOTE
+        self.aspect_choice.set(patches.aspect(s))
+        display = patches.display(s)
+        self.fov.set(patches.fov(s))
+        self.fov.set_enabled(display.wide)
+        self._fov_moved(self.fov.value)
+        if display.wide:
+            w, h = display.size
+            note = WIDE_NOTE.format(w=w, h=h, fov=patches.fov(s), hor=patches.hor_plus(s)) + \
+                (WIDE_HIGH_NOTE.format(lines=display.lines) if render.size[1] > display.lines else "") + \
+                ("\n\n" + note if high else "")
+        hint = patches.screen_hint(app.screen, s)
+        if hint and hint[1] == "warn":
+            note = hint[0] + ".\n\n" + note
+        self.render_note.configure(text=note, fg=app.palette["warn" if high or hint and
+                                                             hint[1] == "warn" else "muted"])
         self.counter_choice.set(app.fps_counter_on())
         self.threading_choice.set(threading_value(app.game_ini()))
         if self.upscaler_choice is not None:
@@ -469,6 +506,20 @@ class SetupPage(tk.Frame):
 
     def set_render_res(self, value: str) -> None:
         self.app.settings.render_res = value
+        self._saved(self.app.save_settings())
+        self.refresh_session()
+
+    def set_aspect(self, value: str) -> None:
+        self.app.settings.aspect = value
+        self._saved(self.app.save_settings())
+        self.refresh_session()
+        self.app.refresh_checks()
+
+    def _fov_moved(self, value: float) -> None:
+        self.fov_value.configure(text=f"{value:.2f}")
+
+    def set_fov(self, value: float) -> None:
+        self.app.settings.fov = round(float(value), 3)
         self._saved(self.app.save_settings())
         self.refresh_session()
 

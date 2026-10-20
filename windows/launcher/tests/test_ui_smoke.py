@@ -371,7 +371,7 @@ def test_run_task_reports_on_the_ui_thread(tmp_path):
 
 
 def test_version_and_bundled_resources(monkeypatch, tmp_path):
-    assert dcport.__version__ == "0.4.2"
+    assert dcport.__version__ == "0.4.3"
     assert theme.default_controls() == DEFAULT_INPUT.resolve()
     assert theme.assets_dir() == DEFAULT_INPUT.resolve().parent / "assets"
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
@@ -1166,5 +1166,24 @@ def test_check_for_updates_button_reports(tmp_path, monkeypatch):
         app.update_ready = None
         page.check_updates()
         pump(app, lambda: "Could not check" in page.status.cget("text"))
+    finally:
+        app.destroy()
+
+
+def test_ultrawide_screen_hint_on_race_and_setup(tmp_path):
+    paths, app, page = _garage(tmp_path)
+    try:
+        app.screen = (3840, 1080)
+        app.refresh_checks()
+        assert any("Ultrawide screen 3840x1080" in c and "32:9" in c for c in _check_labels(app))
+        setup = app.pages["setup"]
+        setup.refresh_session()
+        assert setup.render_note.cget("text").startswith("Ultrawide screen 3840x1080")
+        setup.set_aspect("32:9")
+        assert "Screen 3840x1080: aspect ratio 32:9" in _check_labels(app)
+        assert not setup.render_note.cget("text").startswith("Ultrawide screen")
+        app.screen = (1920, 1080)
+        setup.set_aspect("16:9")
+        assert not any("creen" in c for c in _check_labels(app))
     finally:
         app.destroy()

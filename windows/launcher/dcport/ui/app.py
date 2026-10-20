@@ -16,7 +16,8 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 from dcport import __version__, patches, profiles, sysinfo, updater
-from dcport.game import UPDATE_ONLY, art_path, game_info, has_eboot, is_update_only, ready_checks
+from dcport.game import (UPDATE_ONLY, Check, art_path, game_info, has_eboot, is_update_only,
+                         ready_checks)
 from dcport.ini import read_ini, update_ini
 from dcport.paths import AppPaths
 from dcport.prepare_state import is_prepared, prepare_command
@@ -76,6 +77,7 @@ class App(tk.Tk):
         self.runner = RUNNER
         self.last_log: Path = paths.log
         self.gpu: "str | None" = None
+        self.screen = sysinfo.screen_size()  # SETUP > Aspect ratio hint (patches.screen_hint)
         self.gpu_done = False
         self.phase = "idle"  # idle | preparing | running
         self._then_play = False  # start the game when the running prepare succeeds
@@ -640,6 +642,8 @@ class App(tk.Tk):
         checks = ready_checks(folder, self.paths, self.gpu, prepared)
         if self.gpu is None:
             checks = [self._gpu_placeholder(c) for c in checks]
+        if hint := patches.screen_hint(self.screen, self.settings):
+            checks.append(Check(*hint))
         self.pages["race"].show_checks(checks)
 
     def _gpu_placeholder(self, check):

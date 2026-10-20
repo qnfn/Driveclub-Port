@@ -29,12 +29,13 @@ def encode(line):
     raise ValueError(f'unsupported patch type {kind!r}')
 
 
-def compile_patches(game, xml, out, names):
+def compile_patches(game, xml, out, names, extra=()):
+    """extra: (image offset, bytes) writes after the named patches (the launcher's ultrawide)."""
     version = sfo((Path(game) / 'sce_sys/param.sfo').read_bytes()).get('APP_VER')
     writes = []
     if version != APP_VERSION:
         print(f'Patches: game version {version}, the community patches need {APP_VERSION}; none applied')
-        names = []
+        names, extra = [], ()
     found = {}
     for meta in ET.parse(xml).getroot().iter('Metadata'):
         if meta.get('Name') in names and meta.get('AppVer') == APP_VERSION:
@@ -46,6 +47,7 @@ def compile_patches(game, xml, out, names):
         for line in found[name].iter('Line'):
             writes.append((int(line.get('Address'), 0) - EBOOT_BASE, encode(line)))
         print(f'Patch: {name}')
+    writes += list(extra)
     blob = struct.pack('<8sQQ', b'BBPATCH2', EBOOT_BASE, len(writes))
     for offset, data in writes:
         blob += struct.pack('<QQ', offset, len(data)) + data

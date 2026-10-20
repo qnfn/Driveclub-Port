@@ -20,6 +20,8 @@ class LauncherSettings:
     profile: str = DEFAULT_PROFILE  # whose saves are in user/savedata
     render_res: str = "1080p"  # dcport.patches.RESOLUTIONS
     window_size: str = "1920x1080"  # windowed mode only
+    aspect: str = "16:9"  # dcport.patches.ASPECTS
+    fov: float = 0.65625  # wide aspects only (dcport.patches.DEFAULT_FOV)
     patches: list = field(default_factory=list)  # names of dcport.patches.TOGGLES
     patch_timing: str = "deltatime"  # dcport.patches.TIMING
 
@@ -27,6 +29,8 @@ class LauncherSettings:
 def _valid(value, default) -> bool:
     if isinstance(default, bool):
         return isinstance(value, bool)
+    if isinstance(default, float):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
     if isinstance(default, int):
         return isinstance(value, int) and not isinstance(value, bool)
     return isinstance(value, type(default))
