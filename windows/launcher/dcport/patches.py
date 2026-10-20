@@ -27,6 +27,9 @@ TOGGLES = (
     Toggle(MOTION_BLUR, "No motion blur or depth of field",
            "A sharper picture in motion. The game uses one shader for both, and for its "
            "anti-aliasing: with this on, FSR cannot run."),
+    Toggle("Unlock All Cars and Bikes", "All cars and bikes",
+           "Every car and bike from the start: the club cars that needed the DRIVECLUB server, "
+           "and the Driver Level ones too (the game's own unlockAll option). Patch by illusion."),
     Toggle("Barrier Disable", "No track barriers",
            "Drive off the track without the invisible walls."),
     Toggle("Reset Disable", "No reset to track",

@@ -7,6 +7,16 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.4.2
+
+- **Newer runtime:** DCport now builds on the native PS4 runtime 1.9.2 and its updated shadPS4 GPU layer (0.20.1): many renderer fixes, memory fixes for 4–8 GB graphics cards, and less CPU time per draw. The shader cache is rebuilt once, so the first race stutters a little.
+- **Fewer stutters in races:** the texture cache now follows the graphics card's real memory budget. Before, a 12 GB card started throwing textures out at about 5.5 GB and loaded them again mid-race (short hitches).
+- **All cars and bikes (PATCHES > Garage, off by default):** turns on the game's own `unlockAll` option. Every car and bike is available, also the club cars that needed the DRIVECLUB server (closed in 2020) and the Driver Level ones. Patch by illusion (GoldHEN patch repository).
+- **Frame-rate patch moved to SETUP > Frame rate** (Deltatime or Fixed tick), next to the frame rate it belongs to.
+- **Threading (SETUP)** ran without crashes in our tests of 0.4.2. It stays Auto (off) by default; turn it On for more FPS, and set it back to Auto if a race ends in a crash.
+- **Better crash reports:** after a "Device lost", the log now names what was at the GPU address that faulted (a live or freed buffer or image, or which game-memory area and whether it was loaded). Please send the log (LOG tab) with any crash.
+- **Shader fix** from shadPS4 (#5365): code that runs straight on into the next block is no longer dropped.
+
 ## 0.4.0
 
 - **The mid-race "Device lost" crash is fixed** in testing (RX 6750 XT, RX 9070 XT, Intel CPUs: several races, no crash). The game's memory that shaders read through GPU pointers was not allocated as GPU-addressable, so the GPU sometimes read an invalid address ("invalid read at GPU address ...").
@@ -123,8 +133,7 @@ Requirements: Windows 10/11 64-bit, a CPU with AVX, a Vulkan 1.3 GPU.
 ## Source in this folder
 
 - `launcher/`: the DCport launcher (Python 3.12, Tkinter, Pillow; frozen with PyInstaller via `build.sh fsr|nofsr`) and the first-run prepare tool (`launcher/prepare/`, needs [capstone](https://www.capstone-engine.org/) (BSD) for the red-zone analysis). Tests: `python -m pytest tests`.
-- `runtime/driveclub-runtime.patch`: the Driveclub changes to the native PS4 runtime, against [Supermedo/bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) commit `fce08780508a72f50d34a3d3a2926e746d12284c` (version 1.8.2). Apply with `git apply`, then build with `build.sh` in MSYS2 CLANG64.
-- `runtime/fsr-vulkan.patch.txt`: one small change to its FSR-Vulkan submodule.
+- `runtime/driveclub-runtime.patch`: the Driveclub changes to the native PS4 runtime, against [Supermedo/bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) commit `de2e38a` (version 1.9.2) since DCport 0.4.2 (up to 0.4.0: `fce0878`, 1.8.2). Check out with `git -c core.autocrlf=false` (the patch has LF line endings), apply with `git apply`, then build with `build.sh` in MSYS2 CLANG64 (packages in its `packaging/windows/README.md`, plus `freetype`). The runtime's icon is read from `../launcher/dcport.ico`: put the runtime source next to `launcher/`. Its FSR-Vulkan changes are in the runtime's own `gpu/patches/fsr-vulkan`.
 - `patches/Driveclub.xml`: community patches (60 FPS with deltatime and others).
 
 ## Windows port credits
@@ -136,7 +145,7 @@ DCport is built on other people's work: the native PS4 runtime by deadinside28 a
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4):** renderer, shader recompiler and libraries the runtime is built on.
 - **[akitaonrails](https://github.com/akitaonrails/shadPS4):** shadPS4 investigation of Driveclub (MSAA depth resolve).
 - **Also used:** [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) and the AMD FidelityFX SDK (FSR, FSR 3 frame generation), FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX); [dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv) (MIT) and [SPIRV-Tools](https://github.com/KhronosGroup/SPIRV-Tools) (Apache 2.0) for the FSR 4.1.1 set-up; FreeType, SDL3, FFmpeg and the other libraries listed in `licenses/`.
-- **Community patches** ([shadps4-emu/ps4_cheats](https://github.com/shadps4-emu/ps4_cheats)): illusion, u/Charlie_Muggins, kalaposfos.
+- **Community patches** ([shadps4-emu/ps4_cheats](https://github.com/shadps4-emu/ps4_cheats)): illusion, u/Charlie_Muggins, kalaposfos; "Unlock All Cars and Bikes" by illusion ([GoldHEN patch repository](https://github.com/GoldHEN/GoldHEN_Patch_Repository)).
 - Windows port by **qnfn** (system functions, fonts, readbacks, upscaler integration, launcher).
 
 ## Legal disclaimer

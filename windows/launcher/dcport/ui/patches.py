@@ -7,14 +7,8 @@ from dcport import patches
 from dcport.ui import theme
 
 HINT = "Applies on the next PLAY. Patches by the PS4 and shadPS4 DRIVECLUB community."
-TIMING_CHOICES = (("deltatime", "Deltatime"), ("fixed", "Fixed tick"))
-TIMING_NOTES = {
-    "deltatime": "Smooth at any frame rate. Its authors note that it breaks a few things; "
-                 "switch to the fixed tick if something misbehaves.",
-    "fixed": "The engine's own 60 Hz tick: everything works, but it is not as smooth above "
-             "60 FPS.",
-}
 CARDS = (
+    ("Garage", ("Unlock All Cars and Bikes",)),
     ("Driving", ("Barrier Disable", "Reset Disable")),
     ("Picture", ("Disable motion blur and depth of field",)),
     ("Photo mode", ("Disable Photomode Free Camera Collision", "Disable Photomode Processing")),
@@ -35,8 +29,7 @@ class PatchesPage(tk.Frame):
         self.board.pack(fill="x")
         toggles = {t.name: t for t in patches.TOGGLES}
         self.choices: dict[str, theme.Segmented] = {}
-        self._build_timing(self.board.add(0, 0, title="Frame-rate patch"))
-        for i, (title, names) in enumerate(CARDS, start=1):
+        for i, (title, names) in enumerate(CARDS):
             card = self.board.add(i // 2, i % 2, title=title)
             for j, name in enumerate(names):
                 self._build_toggle(card, toggles[name], first=j == 0)
@@ -46,14 +39,6 @@ class PatchesPage(tk.Frame):
         master.bind("<Configure>", lambda e: label.configure(wraplength=max(1, e.width)),
                     add="+")
         return label
-
-    def _build_timing(self, card) -> None:
-        app = self.app
-        self.timing_choice = theme.Segmented(card, app, TIMING_CHOICES, self.set_timing,
-                                             min_label="Fixed tick")
-        self.timing_choice.pack(anchor="w")
-        self.timing_note = theme.text_label(card, app, font="small", fg="muted")
-        self._wrapping(self.timing_note, card).pack(fill="x", pady=(app.px(12), 0))
 
     def _build_toggle(self, card, toggle: patches.Toggle, first: bool) -> None:
         app = self.app
@@ -80,13 +65,6 @@ class PatchesPage(tk.Frame):
     def refresh_session(self) -> None:
         """Runs after every settings save (App.save_settings)."""
         s = self.app.settings
-        timing = s.patch_timing if s.patch_timing in patches.TIMING else patches.DEFAULT_TIMING
-        self.timing_choice.set(timing)
-        at_30 = s.fps == 30
-        for value, _ in TIMING_CHOICES:
-            self.timing_choice.set_enabled(value, not at_30)
-        self.timing_note.configure(
-            text="Off at 30 FPS, the game's original timing." if at_30 else TIMING_NOTES[timing])
         for name, choice in self.choices.items():
             choice.set(name in s.patches)
 
@@ -96,10 +74,6 @@ class PatchesPage(tk.Frame):
         else:
             self.status.configure(text="Could not save the settings file (dcport-launcher.json)",
                                   fg=self.app.palette["bad"])
-
-    def set_timing(self, value: str) -> None:
-        self.app.settings.patch_timing = value
-        self._saved(self.app.save_settings())
 
     def set_toggle(self, name: str, on: bool) -> None:
         chosen = [n for n in self.app.settings.patches if n != name]

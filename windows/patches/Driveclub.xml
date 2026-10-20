@@ -515,4 +515,16 @@
             <Line Type="bytes" Address="0x00b54c21" Value="e0100000"/>
         </PatchList>
     </Metadata>
+    <Metadata Title="Driveclub"
+              Name="Unlock All Cars and Bikes"
+              Note="Turns on the game's developer option unlockAll: every car and bike, the club and Driver Level ones too. From the GoldHEN patch repository."
+              Author="illusion"
+              PatchVer="1.0"
+              AppVer="01.28"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x01187caf" Value="9090"/>
+            <Line Type="bytes" Address="0x01187ce7" Value="b801000000"/>
+        </PatchList>
+    </Metadata>
 </Patch>

@@ -24,6 +24,13 @@ WINDOW_CHOICES = tuple((f"{w}x{h}", "4K" if h == 2160 else f"{h}p")
                        for w, h in patches.WINDOW_SIZES)
 RENDER_CHOICES = tuple((r.key, r.label + (" (best)" if r.key == patches.DEFAULT_RESOLUTION
                                            else "")) for r in patches.RESOLUTIONS)
+TIMING_CHOICES = (("deltatime", "Deltatime"), ("fixed", "Fixed tick"))
+TIMING_NOTES = {
+    "deltatime": "Smooth at any frame rate. Its authors note that it breaks a few things; "
+                 "switch to the fixed tick if something misbehaves.",
+    "fixed": "The engine's own 60 Hz tick: everything works, but it is not as smooth above "
+             "60 FPS.",
+}
 THREADING_CHOICES = (("auto", "Auto"), ("1", "On"), ("0", "Off"))
 THREADING_NOTE = ("Threading: the game's GPU work is prepared on extra threads. It gives more FPS "
                   "but can crash mid-race, so Auto keeps it off (as Off does); On turns it on. "
@@ -164,6 +171,18 @@ class SetupPage(tk.Frame):
         self.fps_error = theme.text_label(card, app, font="small_bold", fg="bad")
         self.fps_note = theme.text_label(card, app, font="small", fg="warn")
         self._wrapping(self.fps_note, card)
+        # The frame-rate patch (above 30 FPS); the error and note above go in before it.
+        self.timing_box = tk.Frame(card)
+        app.paint(self.timing_box, bg="panel")
+        self.timing_box.pack(fill="x", pady=(app.px(18), 0))
+        row = self._row(self.timing_box)
+        row.pack(fill="x")
+        theme.text_label(row, app, "Patch").pack(side="left")
+        self.timing_choice = theme.Segmented(row, app, TIMING_CHOICES, self.set_timing,
+                                             min_label="Fixed tick")
+        self.timing_choice.pack(side="left", padx=(app.px(12), 0))
+        self.timing_note = theme.text_label(self.timing_box, app, font="small", fg="muted")
+        self._wrapping(self.timing_note, self.timing_box).pack(fill="x", pady=(app.px(10), 0))
 
     def _build_display(self, card) -> None:
         app = self.app
@@ -283,7 +302,14 @@ class SetupPage(tk.Frame):
         note = fps_note(s.fps) or ("The game's original timing (no frame-rate patches)."
                                    if s.fps == 30 else "")
         self.fps_note.configure(text=note, fg=app.palette["warn" if s.fps > 120 else "muted"])
-        self._pack_if(self.fps_note, bool(note), pady=(app.px(10), 0))
+        self._pack_if(self.fps_note, bool(note), pady=(app.px(10), 0), before=self.timing_box)
+        timing = s.patch_timing if s.patch_timing in patches.TIMING else patches.DEFAULT_TIMING
+        self.timing_choice.set(timing)
+        at_30 = s.fps == 30
+        for value, _ in TIMING_CHOICES:
+            self.timing_choice.set_enabled(value, not at_30)
+        self.timing_note.configure(
+            text="Off at 30 FPS, the game's original timing." if at_30 else TIMING_NOTES[timing])
         self.window_choice.set("fullscreen" if s.fullscreen else "windowed")
         w, h = patches.window_size(s.window_size)
         self.size_choice.set(f"{w}x{h}")
@@ -411,7 +437,7 @@ class SetupPage(tk.Frame):
 
     def _show_fps_error(self, text: str) -> None:
         self.fps_error.configure(text=text)
-        place = {"before": self.fps_note} if self.fps_note.winfo_manager() else {}
+        place = {"before": self.fps_note if self.fps_note.winfo_manager() else self.timing_box}
         self._pack_if(self.fps_error, bool(text), pady=(self.app.px(10), 0), **place)
 
     def fps_note_text(self) -> str:
@@ -425,6 +451,10 @@ class SetupPage(tk.Frame):
         return value if isinstance(value, int) else parse_fps(self.custom.get())
 
     # ------------------------------------------------------------ display
+
+    def set_timing(self, value: str) -> None:
+        self.app.settings.patch_timing = value
+        self._saved(self.app.save_settings())
 
     def set_fullscreen(self, on: bool) -> None:
         self.app.settings.fullscreen = bool(on)
