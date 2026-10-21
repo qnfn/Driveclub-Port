@@ -43,15 +43,29 @@ BLUR_NOTE = ("FSR does not run with the PATCHES page's 'No motion blur or "
              "depth of field': the game's anti-aliasing is in that shader.")
 
 
-READBACKS_CHOICES = (("0", "Off"), ("1", "On"))
-READBACKS_NOTE = ("GPU readbacks: the game gets the GPU's results back exactly when it asks. It "
-                  "restores the roadside grass (and maybe other missing graphics); expect an FPS "
-                  "loss. Off by default. Applies on the next PLAY.")
+READBACKS_CHOICES = (("0", "Off"), ("2", "On"))
+READBACKS_NOTE = ("GPU readbacks: the game gets the GPU's results back exactly when it needs "
+                  "them. It brings back the roadside grass and keeps it on the ground (and maybe "
+                  "other missing graphics). Expect an FPS loss. Off by default. Applies on the "
+                  "next PLAY.")
 
 
 def readbacks_value(ini: dict) -> str:
-    """dcport.ini readbacks: "1" (relaxed) or "0"; anything else (or missing) is Off."""
-    return "1" if ini.get("readbacks", "0").strip() == "1" else "0"
+    """dcport.ini readbacks: "2" (precise) is On; "1" (relaxed, 0.4.4) counts as On too."""
+    return "2" if ini.get("readbacks", "0").strip() in ("1", "2") else "0"
+
+
+FRAME_GEN_CHOICES = (("off", "Off"), ("fsr3", "FSR 3.1"))
+FRAME_GEN_NOTE = ("Frame generation (not fully tested yet, so try it): a generated frame between "
+                  "two of the game's frames, so 60 FPS looks like 120. Needs an FSR mode above "
+                  "and a display with twice the frame rate (Frame rate 60 on a 120 Hz screen). "
+                  "Adds a little input lag. If a race crashes, turn it off. Also in the game's "
+                  "menu.")
+
+
+def frame_gen_value(ini: dict) -> str:
+    """dcport.ini frame_gen: "fsr3" (or "dlss", which runs as FSR 3.1 here) is On."""
+    return "fsr3" if ini.get("frame_gen", "off").strip() in ("fsr3", "dlss") else "off"
 
 
 def threading_value(ini: dict) -> str:
@@ -320,6 +334,14 @@ class SetupPage(tk.Frame):
                                       on_change=self._sharpness_moved,
                                       on_commit=self.set_sharpness)
         self.sharpness.pack(side="left", fill="x", expand=True, padx=(0, app.px(10)))
+        theme.text_label(grid, app, "Frame gen.").grid(row=2, column=0, sticky="w",
+                                                       pady=(app.px(10), 0))
+        self.frame_gen_choice = theme.Segmented(grid, app, FRAME_GEN_CHOICES, self.set_frame_gen,
+                                                min_label="FSR 4.1.1", pad=app.px(10))
+        self.frame_gen_choice.grid(row=2, column=1, sticky="w", pady=(app.px(10), 0))
+        self.frame_gen_note = theme.text_label(card, app, FRAME_GEN_NOTE, font="small",
+                                               fg="muted")
+        self._wrapping(self.frame_gen_note, card).pack(fill="x", pady=(app.px(12), 0))
         self.upscaler_note = theme.text_label(card, app, font="small", fg="muted")
         self._wrapping(self.upscaler_note, card)
         row = self._row(card)
@@ -634,6 +656,10 @@ class SetupPage(tk.Frame):
         self.sharpness.set(sharpness)
         self.sharpness.set_enabled(current != "off")  # as in the game's menu
         self._sharpness_moved(self.sharpness.value)
+        # Frame generation takes its depth and motion from the FSR anti-aliasing pass.
+        self.frame_gen_choice.set(frame_gen_value(ini))
+        for value, _ in FRAME_GEN_CHOICES:
+            self.frame_gen_choice.set_enabled(value, value == "off" or current != "off")
 
     def setup_fsr411(self) -> None:
         """Builds fsr4_411/ from the player's DLL (dcport.fsr411), then selects FSR 4.1.1."""
@@ -738,6 +764,10 @@ class SetupPage(tk.Frame):
     def set_upscaler(self, value: str) -> None:
         # DCport runs DRIVECLUB's upscalers without subpixel jitter: it goes with every change
         self._show_status(self.app.update_game_ini({"upscaler": value, "jitter": "0"}) or "")
+        self._refresh_upscaling()
+
+    def set_frame_gen(self, value: str) -> None:
+        self._show_status(self.app.update_game_ini({"frame_gen": value}) or "")
         self._refresh_upscaling()
 
     def _sharpness_moved(self, value: float) -> None:

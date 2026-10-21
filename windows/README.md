@@ -7,6 +7,12 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.4.6
+
+- **Floating grass fixed.** SETUP > GPU readbacks is now Off / On, and On uses precise, offloaded readbacks (from GR2fork): the game's thread waits for its own copy of the GPU's results while the GPU thread keeps running. The roadside grass is back and stays on the ground. Expect an FPS loss with it On. Reported by @darkresident (#3).
+- **Frame generation is back (not fully tested yet).** SETUP > Anti-aliasing (FSR) > Frame gen. (Off / FSR 3.1), also in the game's menu. bbport's FSR 3.1 frame generation, fed with Driveclub's own depth and motion vectors and the picture before the HUD. It needs an FSR mode and a display with twice the frame rate (Frame rate 60 on a 120 Hz screen). If a race crashes with it on, turn it off and send the log.
+- **Fixes from GR2fork / shadPS4:** textures keep their data when a parent image is created and no longer get stale pixels when they grow, shader translation fixes (buffer cache invalidation, phi folding, sleep, shared memory barriers), and compute queues no longer start at a stale position. The shader cache is rebuilt once.
+
 ## 0.4.5
 
 - **Fixed: GPU readbacks and Threading could not be reached.** In 0.4.4 the SETUP page was taller than the launcher window at its normal size, so the last rows of the Display card (Threading and GPU readbacks) were cut off at the bottom; they only showed in a maximized or fullscreen window. SETUP now scrolls when the window is too small for it.

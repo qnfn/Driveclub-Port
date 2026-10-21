@@ -41,6 +41,18 @@ index 0fcf416..78758a4 100644
      return ORBIS_OK;
  }
  
+diff --git a/gpu/shadps4/core/libraries/gnmdriver/gnmdriver.cpp b/gpu/shadps4/core/libraries/gnmdriver/gnmdriver.cpp
+index 5e27f22..8c8df8f 100644
+--- a/gpu/shadps4/core/libraries/gnmdriver/gnmdriver.cpp
++++ b/gpu/shadps4/core/libraries/gnmdriver/gnmdriver.cpp
+@@ -1264,6 +1264,7 @@ int PS4_SYSV_ABI sceGnmMapComputeQueue(u32 pipe_id, u32 queue_id, VAddr ring_bas
+ 
+     const auto& queue = liverpool->asc_queues[vqid];
+     *queue.read_addr = 0u;
++    asc_next_offs_dw[vqid.index] = 0;
+ 
+     return gnm_vqid;
+ }
 diff --git a/gpu/shadps4/core/libraries/kernel/equeue.cpp b/gpu/shadps4/core/libraries/kernel/equeue.cpp
 index 7ed911d..19efb6d 100644
 --- a/gpu/shadps4/core/libraries/kernel/equeue.cpp
@@ -170,6 +182,26 @@ index f38f077..91898f4 100644
              block.branch_true = next_block;
              block.end_class = EndClass::Branch;
              next_block->num_predecessors++;
+diff --git a/gpu/shadps4/shader_recompiler/frontend/format.cpp b/gpu/shadps4/shader_recompiler/frontend/format.cpp
+index 57a6d7f..0135ac4 100644
+--- a/gpu/shadps4/shader_recompiler/frontend/format.cpp
++++ b/gpu/shadps4/shader_recompiler/frontend/format.cpp
+@@ -4032,11 +4032,11 @@ constexpr std::array<InstFormat, 114> InstructionFormatMUBUF = {{
+     {},
+     {},
+     // 112 = BUFFER_WBINVL1_SC
+-    {InstClass::VectorMemL1Cache, InstCategory::VectorMemory, 4, 1, ScalarType::Undefined,
+-     ScalarType::Undefined},
++    {InstClass::VectorMemL1Cache, InstCategory::VectorMemory, 0, 0, ScalarType::Any,
++     ScalarType::Any},
+     // 113 = BUFFER_WBINVL1
+-    {InstClass::VectorMemL1Cache, InstCategory::VectorMemory, 4, 1, ScalarType::Undefined,
+-     ScalarType::Undefined},
++    {InstClass::VectorMemL1Cache, InstCategory::VectorMemory, 0, 0, ScalarType::Any,
++     ScalarType::Any},
+ }};
+ 
+ constexpr std::array<InstFormat, 8> InstructionFormatMTBUF = {{
 diff --git a/gpu/shadps4/shader_recompiler/frontend/structured_control_flow.cpp b/gpu/shadps4/shader_recompiler/frontend/structured_control_flow.cpp
 index 057be14..100c903 100644
 --- a/gpu/shadps4/shader_recompiler/frontend/structured_control_flow.cpp
@@ -228,6 +260,124 @@ index 616c7c6..6c337fb 100644
          ir.SetAttribute(mrt, converted, i);
      }
  }
+diff --git a/gpu/shadps4/shader_recompiler/frontend/translate/scalar_flow.cpp b/gpu/shadps4/shader_recompiler/frontend/translate/scalar_flow.cpp
+index 8e0cbb8..e101975 100644
+--- a/gpu/shadps4/shader_recompiler/frontend/translate/scalar_flow.cpp
++++ b/gpu/shadps4/shader_recompiler/frontend/translate/scalar_flow.cpp
+@@ -19,6 +19,10 @@ void Translator::EmitFlowControl(const GcnInst& inst) {
+     case Opcode::S_TRAP:
+         LOG_WARNING(Render_Vulkan, "S_TRAP instruction!");
+         return;
++    case Opcode::S_SLEEP:
++        LOG_WARNING(Render_Vulkan,
++                    "S_SLEEP instruction ignored (wave scheduling delay is not emulated).");
++        return;
+     case Opcode::S_GETPC_B64:
+         return S_GETPC_B64(inst);
+     case Opcode::S_SETPC_B64:
+diff --git a/gpu/shadps4/shader_recompiler/frontend/translate/vector_memory.cpp b/gpu/shadps4/shader_recompiler/frontend/translate/vector_memory.cpp
+index 3033382..82ac043 100644
+--- a/gpu/shadps4/shader_recompiler/frontend/translate/vector_memory.cpp
++++ b/gpu/shadps4/shader_recompiler/frontend/translate/vector_memory.cpp
+@@ -7,6 +7,10 @@ namespace Shader::Gcn {
+ 
+ void Translator::EmitVectorMemory(const GcnInst& inst) {
+     switch (inst.opcode) {
++    case Opcode::BUFFER_WBINVL1_SC:
++    case Opcode::BUFFER_WBINVL1:
++        ir.DeviceMemoryBarrier();
++        return;
+         // MUBUF / MTBUF
+ 
+         // Buffer load operations
+diff --git a/gpu/shadps4/shader_recompiler/ir/passes/phi_simplification_pass.cpp b/gpu/shadps4/shader_recompiler/ir/passes/phi_simplification_pass.cpp
+index e620691..0d9184d 100644
+--- a/gpu/shadps4/shader_recompiler/ir/passes/phi_simplification_pass.cpp
++++ b/gpu/shadps4/shader_recompiler/ir/passes/phi_simplification_pass.cpp
+@@ -41,7 +41,7 @@ static bool IsCompositeExtract(IR::Opcode opcode) {
+ }
+ 
+ static bool IsDisallowedOp(IR::Opcode op) {
+-    return op == IR::Opcode::InverseBallot;
++    return op == IR::Opcode::InverseBallot || op == IR::Opcode::GetUserData;
+ }
+ 
+ using InstList = boost::container::small_vector<IR::Inst*, 4>;
+diff --git a/gpu/shadps4/shader_recompiler/ir/passes/shared_memory_barrier_pass.cpp b/gpu/shadps4/shader_recompiler/ir/passes/shared_memory_barrier_pass.cpp
+index d37a014..675018d 100644
+--- a/gpu/shadps4/shader_recompiler/ir/passes/shared_memory_barrier_pass.cpp
++++ b/gpu/shadps4/shader_recompiler/ir/passes/shared_memory_barrier_pass.cpp
+@@ -70,11 +70,14 @@ static void EmitBarrierAtBlockStart(IR::Block* block) {
+     ir.Barrier();
+ }
+ 
+-static bool IsDivergent(const IR::U1& cond) {
+-    return IR::BreadthFirstSearch(cond, [](IR::Inst* inst) -> std::optional<bool> {
++static bool IsDivergent(const IR::U1& cond, const RuntimeInfo& runtime_info) {
++    return IR::BreadthFirstSearch(cond, [&runtime_info](IR::Inst* inst) -> std::optional<bool> {
+                if (inst->GetOpcode() == IR::Opcode::GetAttributeU32 &&
+                    inst->Arg(0).Attribute() == IR::Attribute::LocalInvocationId) {
+-                   return true;
++                   const u32 component = inst->Arg(1).U32();
++                   if (runtime_info.hw.cs.workgroup_size[component] > 1) {
++                       return true;
++                   }
+                }
+                return std::nullopt;
+            }) == true;
+@@ -83,9 +86,10 @@ static bool IsDivergent(const IR::U1& cond) {
+ // Inserts a barrier after divergent conditional blocks to avoid undefined
+ // behavior when some threads write and others read from shared memory.
+ static void EmitBarrierInMergeBlock(const IR::AbstractSyntaxNode::Data& data,
+-                                    NodeSet& divergence_end, u32& divergence_depth) {
++                                    NodeSet& divergence_end, u32& divergence_depth,
++                                    const RuntimeInfo& runtime_info) {
+     const IR::U1 cond = data.if_node.cond;
+-    if (IsDivergent(cond)) {
++    if (IsDivergent(cond, runtime_info)) {
+         if (divergence_depth == 0) {
+             EmitBarrierAtBlockStart(data.if_node.merge);
+         }
+@@ -96,17 +100,18 @@ static void EmitBarrierInMergeBlock(const IR::AbstractSyntaxNode::Data& data,
+ 
+ // A barrier inside a loop is invalid when different invocations leave on different iterations.
+ // Mark such loops so their shared-memory synchronization can be deferred to the merge block.
+-static NodeSet FindDivergentLoops(const IR::AbstractSyntaxList& syntax_list) {
++static NodeSet FindDivergentLoops(const IR::AbstractSyntaxList& syntax_list,
++                                  const RuntimeInfo& runtime_info) {
+     NodeSet divergent_loops;
+     for (const IR::AbstractSyntaxNode& node : syntax_list) {
+         switch (node.type) {
+         case IR::AbstractSyntaxNode::Type::Repeat:
+-            if (IsDivergent(node.data.repeat.cond)) {
++            if (IsDivergent(node.data.repeat.cond, runtime_info)) {
+                 divergent_loops.emplace(node.data.repeat.merge);
+             }
+             break;
+         case IR::AbstractSyntaxNode::Type::Break:
+-            if (IsDivergent(node.data.break_node.cond)) {
++            if (IsDivergent(node.data.break_node.cond, runtime_info)) {
+                 divergent_loops.emplace(node.data.break_node.merge);
+             }
+             break;
+@@ -147,7 +152,7 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
+     using Type = IR::AbstractSyntaxNode::Type;
+     u32 divergence_depth{};
+     NodeSet divergence_end;
+-    const NodeSet divergent_loops = FindDivergentLoops(program.syntax_list);
++    const NodeSet divergent_loops = FindDivergentLoops(program.syntax_list, runtime_info);
+     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+         if (node.type == Type::EndIf) {
+             if (divergence_end.contains(node.data.end_if.merge)) {
+@@ -158,7 +163,7 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
+         // Check if branch depth is zero, we don't want to insert barrier in potentially divergent
+         // code.
+         if (node.type == Type::If) {
+-            EmitBarrierInMergeBlock(node.data, divergence_end, divergence_depth);
++            EmitBarrierInMergeBlock(node.data, divergence_end, divergence_depth, runtime_info);
+             continue;
+         }
+         if (node.type == Type::Loop && divergent_loops.contains(node.data.loop.merge)) {
 diff --git a/gpu/shadps4/video_core/amdgpu/liverpool.cpp b/gpu/shadps4/video_core/amdgpu/liverpool.cpp
 index 25a81b3..06d63af 100644
 --- a/gpu/shadps4/video_core/amdgpu/liverpool.cpp
@@ -296,7 +446,7 @@ index 1211eb6..c983d71 100644
          ++wait_cursor;
      }
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-index 53525a9..8119249 100644
+index 53525a9..c04e390 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 @@ -4,10 +4,15 @@
@@ -323,12 +473,19 @@ index 53525a9..8119249 100644
  #include "video_core/renderer_vulkan/vk_runtime.h"
  #include "video_core/renderer_vulkan/vk_scheduler.h"
  #include "video_core/texture_cache/texture_cache.h"
-@@ -151,9 +157,13 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
+@@ -151,9 +157,20 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                                                       MemoryType::DeviceLocal, "Null Index Buffer");
          runtime.FillBuffer(null_index_buffer.get(), 0u, NULL_INDEX_BUFFER_SIZE, 0u);
      }
 +    Vulkan::Breadcrumbs::SetDescriber(
 +        [this](u64 gpu_address) { return DescribeGpuAddress(gpu_address); });
++    readback_offload = EmulatorSettings.IsReadbackOffload();
++    if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
++        std::printf("GPU readbacks: %s, %s\n",
++                    EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise ? "precise"
++                                                                                      : "relaxed",
++                    readback_offload ? "offloaded" : "synchronous");
++    }
  }
  
 -BufferCache::~BufferCache() = default;
@@ -338,7 +495,7 @@ index 53525a9..8119249 100644
  
  void BufferCache::TickFrame() {
      if (std::exchange(fault_process_pending, false)) {
-@@ -210,6 +220,37 @@ void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is
+@@ -210,6 +227,41 @@ void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is
  
  void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool async,
                               bool assume_locks) {
@@ -373,13 +530,194 @@ index 53525a9..8119249 100644
 +            std::fflush(stdout);
 +        }
 +    }
++    if (readback_offload && !assume_locks && !async &&
++        OffloadReadback(device_addr, size, is_write)) {
++        return;
++    }
      const auto flush_request = [this, device_addr, size, is_write, async] {
          const u32 first_block = device_addr >> block_shift;
          const u32 last_block = (device_addr + size - 1) >> block_shift;
-@@ -232,6 +273,122 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
+@@ -223,6 +275,14 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
+             std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
+         const VAddr window_end = std::min<VAddr>(
+             std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
++        // bbport: a CPU write marks only its own range CPU modified (as GR2fork does). Marking
++        // the whole window re-uploaded 512 KiB at the next bind for every 8-byte write, and an
++        // empty download left the written range unmarked.
++        if (is_write && !async) {
++            DownloadMemory(arena, window_start, window_end - window_start, false, false);
++            memory_tracker->MarkRegionAsCpuModified(device_addr, size);
++            return;
++        }
+         DownloadMemory(arena, window_start, window_end - window_start, is_write, async);
+     };
+     if (assume_locks) {
+@@ -232,8 +292,293 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
      }
  }
  
++struct BufferCache::Readback {
++    VAddr window{};
++    DownloadCopies copies{};
++    Vulkan::StagingBufferRef staging{};
++    VAddr arena_base{};
++    u64 write_seq{};
++    u64 tick{};
++    bool busy{};
++};
++
++u64 BufferCache::CollectDownloads(const Buffer* arena, VAddr device_addr, u64 size,
++                                  DownloadCopies& copies) {
++    u64 total_size_bytes = 0;
++    const VAddr arena_base = arena->cpu_addr;
++    memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
++        const auto add_download = [&](VAddr start, VAddr end) {
++            copies.push_back(vk::BufferCopy{
++                .srcOffset = start - arena_base,
++                .dstOffset = total_size_bytes,
++                .size = end - start,
++            });
++            // Align up to avoid cache conflicts
++            total_size_bytes += Common::AlignUp(end - start, 64);
++        };
++        gpu_modified_ranges.ForEachInRange(address, size, add_download);
++        gpu_modified_ranges.Subtract(address, size);
++    });
++    return total_size_bytes;
++}
++
++bool BufferCache::OffloadReadback(VAddr device_addr, u64 size, bool is_write) {
++    const VAddr window = Common::AlignDown(device_addr, ReadbackWindowSize);
++    if (device_addr + size > window + ReadbackWindowSize) {
++        return false;
++    }
++    // A request still GPU modified after two rounds of its own takes the synchronous download,
++    // which copies and unmarks in one GPU thread command.
++    u32 attempts = 0;
++    while (attempts < 2) {
++        if (WaitPendingReadback(window, device_addr, size, is_write)) {
++            return true;
++        }
++        Readback job{.window = window};
++        liverpool->SendCommand<true>([this, &job] { RecordReadback(job); });
++        if (job.busy) {
++            std::unique_lock lk{readback_mutex};
++            readback_cv.wait(lk, [&] { return !IsReadbackPending(window, ReadbackWindowSize); });
++        } else {
++            ++attempts;
++            if (!job.copies.empty()) {
++                scheduler.GetWorkSemaphore()->Wait(job.tick);
++                FinishReadback(job);
++            }
++        }
++        bool resolved = true;
++        if (is_write) {
++            // Marks the range CPU modified if it is GPU clean.
++            memory_tracker->InvalidateRegion(device_addr, size, [&resolved] { resolved = false; });
++        } else {
++            resolved = !memory_tracker->IsRegionGpuModified(device_addr, size);
++        }
++        if (resolved) {
++            return true;
++        }
++    }
++    return false;
++}
++
++bool BufferCache::WaitPendingReadback(VAddr window, VAddr device_addr, u64 size, bool is_write) {
++    {
++        std::unique_lock lk{readback_mutex};
++        if (!IsReadbackPending(window, ReadbackWindowSize)) {
++            return false;
++        }
++        readback_cv.wait(lk, [&] { return !IsReadbackPending(window, ReadbackWindowSize); });
++    }
++    if (is_write) {
++        bool resolved = true;
++        memory_tracker->InvalidateRegion(device_addr, size, [&resolved] { resolved = false; });
++        return resolved;
++    }
++    return !memory_tracker->IsRegionGpuModified(device_addr, size);
++}
++
++void BufferCache::RecordReadback(Readback& job) {
++    const u64 block = job.window >> block_shift;
++    const auto* arena = GetArena(block, block);
++    {
++        std::scoped_lock lk{readback_mutex};
++        if (IsReadbackPending(job.window, ReadbackWindowSize)) {
++            job.busy = true;
++            return;
++        }
++    }
++    const u64 total_size_bytes = ClaimReadbackWindow(arena, job.window, job.copies);
++    if (total_size_bytes == 0) {
++        return;
++    }
++    // Held until FinishReadback releases it; the pool reuses it once the GPU passes that release.
++    job.staging = staging_pool.Request(total_size_bytes, MemoryType::HostCached, 16, true);
++    for (auto& copy : job.copies) {
++        copy.dstOffset += job.staging.offset;
++    }
++    job.arena_base = arena->cpu_addr;
++    job.write_seq = memory_tracker->GpuWriteSeq(job.window, ReadbackWindowSize);
++    runtime.CopyBuffer(arena, job.staging.buffer, job.copies);
++    job.tick = scheduler.CurrentTick();
++    // Submitted without waiting: the faulting thread waits for this tick, the GPU thread goes on.
++    scheduler.Flush();
++}
++
++void BufferCache::FinishReadback(const Readback& job) {
++    job.staging.Invalidate();
++    // The write-back runs ahead of the verdict: other downloads of the window wait while this one
++    // is pending, and a vetoed window stays GPU modified.
++    for (const auto& copy : job.copies) {
++        auto* dst_addr = std::bit_cast<u8*>(job.arena_base + copy.srcOffset);
++        memory->TryWriteBacking(
++            dst_addr, job.staging.mapped + (copy.dstOffset - job.staging.offset), copy.size);
++    }
++    const bool unmarked = memory_tracker->TryUnmarkRegionAsGpuModified(
++        job.window, ReadbackWindowSize, job.write_seq);
++    {
++        std::scoped_lock lk{readback_mutex};
++        if (!unmarked) {
++            for (const auto& copy : job.copies) {
++                readback_returns.emplace_back(job.arena_base + copy.srcOffset, copy.size);
++            }
++        }
++        std::erase(pending_readbacks, job.window);
++    }
++    readback_cv.notify_all();
++    // The staging pool belongs to the GPU thread.
++    liverpool->SendCommand([this, staging = job.staging] { staging_pool.FreeDeferred(staging); });
++}
++
++bool BufferCache::IsReadbackPending(VAddr addr, u64 size) const {
++    return std::ranges::any_of(pending_readbacks, [&](VAddr window) {
++        return window < addr + size && addr < window + ReadbackWindowSize;
++    });
++}
++
++u64 BufferCache::ClaimReadbackWindow(const Buffer* arena, VAddr window, DownloadCopies& copies) {
++    std::scoped_lock lk{readback_mutex};
++    if (IsReadbackPending(window, ReadbackWindowSize)) {
++        return 0;
++    }
++    MergeReadbackReturns();
++    const u64 total_size_bytes = CollectDownloads(arena, window, ReadbackWindowSize, copies);
++    if (total_size_bytes != 0) {
++        pending_readbacks.push_back(window);
++    }
++    return total_size_bytes;
++}
++
++void BufferCache::MergeReadbackReturns() {
++    for (const auto& [addr, size] : readback_returns) {
++        gpu_modified_ranges.Add(addr, size);
++    }
++    readback_returns.clear();
++}
++
 +void BufferCache::AsyncReadbackFrame() {
 +    static const bool enabled = [] {
 +        const char* env = std::getenv("BB_ASYNC_READBACK");
@@ -498,8 +836,17 @@ index 53525a9..8119249 100644
 +
  void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool is_write,
                                   bool async) {
++    if (readback_offload) {
++        // A pending offloaded readback owns the GPU modified pages of its window until it
++        // finishes (its thread only waits for a submission that is already made).
++        std::unique_lock lk{readback_mutex};
++        readback_cv.wait(lk, [&] { return !IsReadbackPending(device_addr, size); });
++        MergeReadbackReturns();
++    }
      boost::container::small_vector<vk::BufferCopy, 1> copies;
-@@ -429,6 +586,10 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+     u64 total_size_bytes = 0;
+     const VAddr arena_base = arena->cpu_addr;
+@@ -429,6 +774,10 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
      }
      if (is_written) {
          gpu_modified_ranges.Add(device_addr, size);
@@ -510,7 +857,7 @@ index 53525a9..8119249 100644
      }
      return {arena, arena->Offset(device_addr)};
  }
-@@ -542,6 +703,51 @@ void BufferCache::SynchronizeDmaBuffers() {
+@@ -542,6 +891,51 @@ void BufferCache::SynchronizeDmaBuffers() {
      }
  }
  
@@ -562,7 +909,7 @@ index 53525a9..8119249 100644
  const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
      const u64 first_page = first_block >> blocks_per_arena_page_shift;
      const u64 last_page = last_block >> blocks_per_arena_page_shift;
-@@ -557,6 +763,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
+@@ -557,6 +951,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
              const auto* new_arena =
                  &arenas.emplace_back(instance, base_block << block_shift,
                                       num_pages << arena_page_bits, MemoryType::Sparse);
@@ -570,7 +917,7 @@ index 53525a9..8119249 100644
              address_space[first_page] = new_arena;
              address_space[last_page] = new_arena;
          }
-@@ -573,6 +780,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
+@@ -573,6 +968,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
      const u64 total_size = first_size + last_size;
      const u64 end_block = (first_addr + total_size) >> block_shift;
      auto* new_arena = &arenas.emplace_back(instance, first_addr, total_size, MemoryType::Sparse);
@@ -579,12 +926,14 @@ index 53525a9..8119249 100644
      resident_ranges.ForEachInRange(base_block, end_block, [&](const Backing& backing) {
          const u64 start = std::max(base_block, backing.start);
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h b/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
-index 252b2a0..5de9ee0 100644
+index 252b2a0..a10aaa1 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
-@@ -6,6 +6,9 @@
+@@ -5,7 +5,11 @@
+ 
  #include "bbport_copy.h"
  
++#include <condition_variable>
  #include <deque>
 +#include <mutex>
 +#include <utility>
@@ -592,7 +941,7 @@ index 252b2a0..5de9ee0 100644
  #include <boost/container/small_vector.hpp>
  
  #include "common/enum.h"
-@@ -135,6 +138,11 @@ public:
+@@ -135,6 +139,11 @@ public:
      [[nodiscard]] u64 ArenaReserveBytes() const { return reserve_size; }
      [[nodiscard]] u64 ArenaReserveUsedBytes() const { return reserve_used; }
  
@@ -604,7 +953,7 @@ index 252b2a0..5de9ee0 100644
      /// Synchronizes all buffers needed for DMA.
      void SynchronizeDmaBuffers();
  
-@@ -157,6 +165,10 @@ private:
+@@ -157,11 +166,40 @@ private:
  
      const Buffer* GetArena(u64 first_block, u64 last_block);
  
@@ -615,7 +964,37 @@ index 252b2a0..5de9ee0 100644
      void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
  
      void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool is_write,
-@@ -194,6 +206,10 @@ private:
+                         bool async);
+ 
++    // DCport: offloaded readbacks (from GR2fork). A guest thread that faults on GPU-written
++    // memory has the GPU thread record the download of its window and submit it without
++    // waiting, then waits for that submission itself and writes the data back.
++    struct Readback;
++    using DownloadCopies = boost::container::small_vector<vk::BufferCopy, 1>;
++    static constexpr u64 ReadbackWindowSize = 512_KB;
++    /// Moves the GPU modified ranges of a span into copies from the arena, packed from 0.
++    u64 CollectDownloads(const Buffer* arena, VAddr device_addr, u64 size, DownloadCopies& copies);
++    /// Downloads a request inside one readback window while the GPU thread keeps running.
++    /// False: the request takes the synchronous download.
++    bool OffloadReadback(VAddr device_addr, u64 size, bool is_write);
++    /// Waits for a pending readback of the window; true when it resolved the request.
++    bool WaitPendingReadback(VAddr window, VAddr device_addr, u64 size, bool is_write);
++    /// Records and submits the download of a readback window. Runs on the GPU thread.
++    void RecordReadback(Readback& job);
++    /// Writes a signaled readback to guest memory; unmarks its window if the GPU did not write
++    /// there meanwhile (else its ranges return to gpu_modified_ranges).
++    void FinishReadback(const Readback& job);
++    /// True when a pending readback window overlaps the range. Requires readback_mutex.
++    bool IsReadbackPending(VAddr addr, u64 size) const;
++    /// Takes the window's GPU modified ranges and marks it pending, under readback_mutex.
++    u64 ClaimReadbackWindow(const Buffer* arena, VAddr window, DownloadCopies& copies);
++    /// Merges vetoed readback ranges back into gpu_modified_ranges. Requires readback_mutex.
++    void MergeReadbackReturns();
++
+     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
+                            bool is_texel_buffer);
+ 
+@@ -194,6 +232,18 @@ private:
      Buffer gds_buffer;
      std::unique_ptr<Buffer> null_index_buffer;
      RangeSet gpu_modified_ranges;
@@ -623,6 +1002,14 @@ index 252b2a0..5de9ee0 100644
 +    static constexpr u64 AsyncReadbackMaxFrameBytes = 8_MB;
 +    std::mutex frame_written_mutex;
 +    std::vector<std::pair<VAddr, u64>> frame_written; ///< small GPU writes since the last flip
++
++    bool readback_offload{};
++    std::mutex readback_mutex;
++    std::condition_variable readback_cv;
++    /// Readback windows with a submitted download that the faulting thread has yet to finish.
++    std::vector<VAddr> pending_readbacks;
++    /// Ranges of vetoed readbacks, merged back into gpu_modified_ranges on the GPU thread.
++    std::vector<std::pair<VAddr, u64>> readback_returns;
  
      std::unique_ptr<FaultManager> fault_manager;
      std::unique_ptr<Buffer> bda_pagetable_buffer;
@@ -646,6 +1033,113 @@ index e7b3adb..11757ec 100644
          scheduler.Wait(wait_tick);
          scheduler.PopPendingOperations();
      }
+diff --git a/gpu/shadps4/video_core/buffer_cache/memory_tracker.h b/gpu/shadps4/video_core/buffer_cache/memory_tracker.h
+index a5f104b..ce408a4 100644
+--- a/gpu/shadps4/video_core/buffer_cache/memory_tracker.h
++++ b/gpu/shadps4/video_core/buffer_cache/memory_tracker.h
+@@ -55,6 +55,31 @@ public:
+         });
+     }
+ 
++    /// Returns a value that changes whenever a GPU write is marked in a range of one region
++    /// (offloaded readbacks, GR2fork).
++    u64 GpuWriteSeq(VAddr cpu_addr, u64 size) noexcept {
++        const auto* manager = top_tier[cpu_addr >> HIGHER_PAGE_BITS];
++        return manager ? manager->GpuWriteSeq(cpu_addr & HIGHER_PAGE_MASK, size) : 0;
++    }
++
++    /// Unmarks a range of one region as GPU modified and returns true if no GPU write was marked
++    /// in it since GpuWriteSeq returned write_seq.
++    bool TryUnmarkRegionAsGpuModified(VAddr cpu_addr, u64 size, u64 write_seq) noexcept {
++        auto* manager = top_tier[cpu_addr >> HIGHER_PAGE_BITS];
++        if (!manager) {
++            return true;
++        }
++        const u64 offset = cpu_addr & HIGHER_PAGE_MASK;
++        const auto bounds = manager->GetBounds(offset, size);
++        manager->Lock(bounds);
++        const bool unwritten = manager->GpuWriteSeq(offset, size) == write_seq;
++        if (unwritten) {
++            manager->template ChangeRegionState<StateOp::None, StateOp::Clear, false>(offset, size);
++        }
++        manager->Unlock(bounds);
++        return unwritten;
++    }
++
+     /// Mark region as modified from the CPU
+     void MarkRegionAsCpuModified(VAddr cpu_addr, u64 size) noexcept {
+         IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
+diff --git a/gpu/shadps4/video_core/buffer_cache/region_manager.h b/gpu/shadps4/video_core/buffer_cache/region_manager.h
+index e9eff89..bef030a 100644
+--- a/gpu/shadps4/video_core/buffer_cache/region_manager.h
++++ b/gpu/shadps4/video_core/buffer_cache/region_manager.h
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <numeric>
+ #include <utility>
+ 
+ #include "common/adaptive_mutex.h"
+@@ -27,7 +28,8 @@ class RegionManager {
+ public:
+     explicit RegionManager(PageManager* tracker_, VAddr cpu_addr_)
+         : tracker{tracker_}, cpu_addr{cpu_addr_},
+-          readbacks_mode{EmulatorSettings.GetReadbacksMode()} {
++          readbacks_mode{EmulatorSettings.GetReadbacksMode()},
++          readback_offload{EmulatorSettings.IsReadbackOffload()} {
+         cpu.Fill(true);
+         gpu.Fill(false);
+     }
+@@ -212,6 +214,14 @@ public:
+         mutex.unlock();
+     }
+ 
++    /// Sums the GPU write sequences of the words covering a range. Each sequence only grows, so
++    /// the sum changes whenever a GPU write is marked in the range (GR2fork).
++    u64 GpuWriteSeq(u64 offset, u64 size) const noexcept {
++        const auto bounds = GetBounds(offset, size);
++        return std::accumulate(gpu_write_seq.begin() + bounds.start_word,
++                               gpu_write_seq.begin() + bounds.end_word + 1, u64{0});
++    }
++
+     void Lock(const Bounds& bounds) noexcept {
+         mutex.lock();
+     }
+@@ -274,6 +284,9 @@ private:
+         }
+         if constexpr (gpu_op != StateOp::None) {
+             gpu[index] = Apply<gpu_op>(gpu[index], mask);
++            if constexpr (gpu_op == StateOp::Set) {
++                ++gpu_write_seq[index];
++            }
+             gpu.set_summary =
+                 gpu[index] ? (gpu.set_summary | summary_bit) : (gpu.set_summary & ~summary_bit);
+             gpu.clear_summary = gpu[index] != ~u64{0} ? (gpu.clear_summary | summary_bit)
+@@ -322,7 +335,9 @@ private:
+         if constexpr (iter_type == Type::GPU) {
+             return any_set(gpu);
+         } else if constexpr (gpu_op == StateOp::Set) {
+-            return any_clear(gpu);
++            // With offloaded readbacks a mark of pages already GPU modified still advances
++            // gpu_write_seq, so it is never skipped (GR2fork).
++            return readback_offload || any_clear(gpu);
+         } else if constexpr (gpu_op == StateOp::Clear) {
+             return any_set(gpu);
+         } else {
+@@ -362,9 +377,12 @@ private:
+     PageManager* tracker;
+     VAddr cpu_addr{};
+     u32 readbacks_mode;
++    bool readback_offload{};
+     RegionBits cpu;
+     RegionBits gpu;
+     LockType mutex;
++    /// Per word: grows with every GPU write marked in it (offloaded readbacks, GR2fork).
++    std::array<u64, NUM_REGION_WORDS> gpu_write_seq{};
+ };
+ 
+ } // namespace VideoCore
 diff --git a/gpu/shadps4/video_core/host_shaders/CMakeLists.txt b/gpu/shadps4/video_core/host_shaders/CMakeLists.txt
 index 8c9d802..b087210 100644
 --- a/gpu/shadps4/video_core/host_shaders/CMakeLists.txt
@@ -697,10 +1191,10 @@ index 0000000..0fbf48a
 +}
 diff --git a/gpu/shadps4/video_core/host_shaders/dc_motion.comp b/gpu/shadps4/video_core/host_shaders/dc_motion.comp
 new file mode 100644
-index 0000000..f6e37c5
+index 0000000..ab0d5b7
 --- /dev/null
 +++ b/gpu/shadps4/video_core/host_shaders/dc_motion.comp
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,67 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +// Driveclub: motion vectors for the temporal upscaler, by the reprojection of the game's own TAA
 +// resolve (compute shader 0x403f86d4): the view position from the depth and the frame's view
@@ -719,7 +1213,7 @@ index 0000000..f6e37c5
 +layout(binding = 3) uniform texture2D gbuffer_tex; // RGBA8; alpha * 255, low 6 bits: object
 +layout(binding = 4) uniform texture2D depth_tex;   // D32, reversed (1 = near)
 +layout(binding = 5, rg16f) uniform writeonly image2D motion_img;
-+// The depth as it is now, for frame generation at the flip (the game may reuse its target).
++// The depth as it is now, for frame generation (the game may reuse its target).
 +layout(binding = 6, r32f) uniform writeonly image2D depth_copy_img;
 +
 +layout(push_constant) uniform Constants {
@@ -750,7 +1244,8 @@ index 0000000..f6e37c5
 +    // in the motion vectors.
 +    const vec2 uv = (vec2(pixel) + 0.5) / size - jitter / size;
 +    const float depth = texelFetch(depth_tex, pixel, 0).r;
-+    imageStore(depth_copy_img, pixel, vec4(depth));
++    // Frame generation takes 0 at the near plane: with the infinite far plane, 1 - depth.
++    imageStore(depth_copy_img, pixel, vec4(1.0 - depth));
 +    const uint object = uint(texelFetch(gbuffer_tex, pixel, 0).a * 255.0 + 0.5) & 63u;
 +
 +    const float ray_x = (Fr(76u) * uv.x + Fr(78u)) * Fr(94u) + Fr(92u);
@@ -1255,6 +1750,38 @@ index 0000000..d10b6c4
 +
 +} // namespace Breadcrumbs
 +} // namespace Vulkan
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_frame_generation.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_frame_generation.cpp
+index c276c2f..b03ff57 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_frame_generation.cpp
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_frame_generation.cpp
+@@ -39,8 +39,10 @@ vk::Format HudlessViewFormat(vk::Format storage, vk::Format requested) {
+     }
+ }
+ 
+-constexpr vk::ImageUsageFlags InputUsage =
+-    vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled;
++// DCport: transfer destination for Driveclub's motion vectors (copied in, MotionImage()).
++constexpr vk::ImageUsageFlags InputUsage = vk::ImageUsageFlagBits::eStorage |
++                                           vk::ImageUsageFlagBits::eSampled |
++                                           vk::ImageUsageFlagBits::eTransferDst;
+ 
+ int DlssMaxCount() {
+     const Dlss* dlss = Dlss::Get();
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_frame_generation.h b/gpu/shadps4/video_core/renderer_vulkan/vk_frame_generation.h
+index 3041663..775b196 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_frame_generation.h
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_frame_generation.h
+@@ -70,6 +70,10 @@ public:
+     /// write next (RG16F storage, General: pixels, previous minus current), or null when off.
+     vk::ImageView BeginCapture(vk::CommandBuffer cmdbuf, vk::ImageView depth, u32 w, u32 h);
+     using Camera = FrameGenCamera;
++    /// DCport: the image behind BeginCapture's motion view (General), for a copy into it.
++    [[nodiscard]] vk::Image MotionImage() {
++        return vk::Image(motion_image);
++    }
+     /// After the motion vectors are written. `motion_valid` false: they are zero this frame.
+     void EndCapture(vk::CommandBuffer cmdbuf, std::array<float, 2> jitter, bool motion_valid,
+                     Camera camera = {});
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
 index 2c70bba..ff2041b 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
@@ -1596,7 +2123,7 @@ index 6135cbe..b26942b 100644
      const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
      auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
-index 8b6f955..d7ee1e1 100644
+index 8b6f955..fac3fe7 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
 @@ -14,7 +14,9 @@ namespace Serialization {
@@ -1606,7 +2133,7 @@ index 8b6f955..d7ee1e1 100644
 -static constexpr u32 ShaderBinaryVersion = 11u;
 +// DCport 12: 11/11/10 float image stores clamped like the PS4 (DCport 0.4.x caches were 8/9).
 +// DCport 13: CFG fallthrough edges kept (shadPS4 #5365).
-+static constexpr u32 ShaderBinaryVersion = 13u;
++static constexpr u32 ShaderBinaryVersion = 14u;
  static constexpr u32 ShaderMetaVersion = 8u;
  static constexpr u32 PipelineKeyVersion = 6u;
  } // namespace Serialization
@@ -2425,7 +2952,7 @@ index 0a2fea3..47435e6 100644
  
      for (vk::Semaphore& semaphore : image_acquired) {
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
-index 7c2da3f..8a4a9b5 100644
+index 7c2da3f..fe4c140 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
 @@ -7,6 +7,7 @@
@@ -2569,7 +3096,69 @@ index 7c2da3f..8a4a9b5 100644
      const auto make_image = [&](VideoCore::UniqueImage& image, vk::UniqueImageView& view,
                                  vk::Format format, vk::ImageUsageFlags usage, u32 iw = 0,
                                  u32 ih = 0, vk::ImageAspectFlags aspect =
-@@ -2118,9 +2171,9 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image
+@@ -1287,6 +1340,61 @@ void TemporalUpscaler::CaptureFrameGen() {
+     }
+ }
+ 
++void TemporalUpscaler::CaptureDcFrameGen(vk::CommandBuffer cmdbuf, u32 w, u32 h,
++                                         bool history_reset) {
++    // The depth copy (0 at the near plane) goes through the generator's own depth pass; the
++    // motion vectors (pixels, previous - current) are copied as they are.
++    const vk::ImageView fg_motion = frame_generator->BeginCapture(cmdbuf, *depth_copy_view, w, h);
++    if (!fg_motion) {
++        return;
++    }
++    const vk::Image target = frame_generator->MotionImage();
++    const auto barrier = [](vk::Image image, vk::PipelineStageFlags2 src_stage,
++                            vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst_stage,
++                            vk::AccessFlags2 dst_access) {
++        return vk::ImageMemoryBarrier2{
++            .srcStageMask = src_stage,
++            .srcAccessMask = src_access,
++            .dstStageMask = dst_stage,
++            .dstAccessMask = dst_access,
++            .oldLayout = vk::ImageLayout::eGeneral,
++            .newLayout = vk::ImageLayout::eGeneral,
++            .image = image,
++            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
++        };
++    };
++    const std::array<vk::ImageMemoryBarrier2, 2> to_copy{
++        barrier(vk::Image(motion_image), vk::PipelineStageFlagBits2::eComputeShader,
++                vk::AccessFlagBits2::eShaderWrite, vk::PipelineStageFlagBits2::eTransfer,
++                vk::AccessFlagBits2::eTransferRead),
++        barrier(target, vk::PipelineStageFlagBits2::eComputeShader,
++                vk::AccessFlagBits2::eShaderWrite, vk::PipelineStageFlagBits2::eTransfer,
++                vk::AccessFlagBits2::eTransferWrite),
++    };
++    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 2, .pImageMemoryBarriers = to_copy.data()});
++    const vk::ImageCopy copy{
++        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
++        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
++        .extent = {w, h, 1},
++    };
++    cmdbuf.copyImage(vk::Image(motion_image), vk::ImageLayout::eGeneral, target,
++                     vk::ImageLayout::eGeneral, copy);
++    // Our motion vectors are read next by the upscaler; the generator's by its own passes.
++    const std::array<vk::ImageMemoryBarrier2, 2> after_copy{
++        barrier(vk::Image(motion_image), vk::PipelineStageFlagBits2::eTransfer,
++                vk::AccessFlagBits2::eTransferRead, vk::PipelineStageFlagBits2::eAllCommands,
++                vk::AccessFlagBits2::eShaderRead),
++        barrier(target, vk::PipelineStageFlagBits2::eTransfer,
++                vk::AccessFlagBits2::eTransferWrite, vk::PipelineStageFlagBits2::eAllCommands,
++                vk::AccessFlagBits2::eShaderRead),
++    };
++    cmdbuf.pipelineBarrier2(
++        {.imageMemoryBarrierCount = 2, .pImageMemoryBarriers = after_copy.data()});
++    // No jitter in Driveclub; the far plane is infinite (3000, as CaptureFrameGen's).
++    frame_generator->EndCapture(cmdbuf, {}, !history_reset,
++                                FrameGenCamera{dc_near, 3000.0f, dc_vertical_fov});
++}
++
+ namespace {
+ /// BB_FRAME_GEN_HUDLESS=0: the generated frames are interpolated with the UI (diagnosis).
+ bool HudlessWanted() {
+@@ -2118,9 +2226,9 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image
          .preset = applied_preset,
          .jitter = {sign * jitter[0], sign * jitter[1]},
          .frame_ms = frame_ms,
@@ -2582,7 +3171,7 @@ index 7c2da3f..8a4a9b5 100644
          .sharpness = std::min(settings.sharpness.load(), 1.0f),
          .sharpen = settings.sharpen,
          .reset = reset,
-@@ -2194,4 +2247,462 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
+@@ -2194,4 +2302,396 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
      return ok;
  }
  
@@ -2608,84 +3197,15 @@ index 7c2da3f..8a4a9b5 100644
 +void TemporalUpscaler::OnDcDisplayDraw(VideoCore::ImageId display) {
 +    ++display_draws;
 +    // Only frames with a scene still waiting for the flip, and only while generating frames.
-+    if (!dc_mode || !fg_ready || !display || !BbSettings::Get().frame_gen) {
++    if (!dc_mode || !fg_ready || !display || !frame_generator || !frame_generator->Wanted()) {
 +        return;
 +    }
 +    if (++fg_display_draws != 2) {
 +        return; // the first draw copies the finished frame; the second is the HUD's first
 +    }
-+    auto& image = texture_cache.GetImage(display);
-+    vk::Format raw{};
-+    switch (image.info.pixel_format) {
-+    case vk::Format::eB8G8R8A8Unorm:
-+    case vk::Format::eB8G8R8A8Srgb:
-+        raw = vk::Format::eB8G8R8A8Unorm;
-+        break;
-+    case vk::Format::eR8G8B8A8Unorm:
-+    case vk::Format::eR8G8B8A8Srgb:
-+        raw = vk::Format::eR8G8B8A8Unorm;
-+        break;
-+    default:
-+        return; // 10-bit or HDR buffers: the HUD stays in the interpolated frames
-+    }
-+    const u32 w = image.info.size.width, h = image.info.size.height;
-+    if (!hudless_image || hudless_format != raw || hudless_width != w || hudless_height != h) {
-+        // The previous copy may still be read: freed once the GPU is past this point (no wait
-+        // here, on the recording thread).
-+        if (hudless_image) {
-+            scheduler.DeferOperation([old = std::move(hudless_image)]() mutable {});
-+        }
-+        hudless_image = VideoCore::UniqueImage(instance.GetDevice(), instance.GetAllocator());
-+        hudless_image.Create(vk::ImageCreateInfo{
-+            .imageType = vk::ImageType::e2D,
-+            .format = raw,
-+            .extent = {w, h, 1},
-+            .mipLevels = 1,
-+            .arrayLayers = 1,
-+            .samples = vk::SampleCountFlagBits::e1,
-+            .tiling = vk::ImageTiling::eOptimal,
-+            .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc,
-+            .initialLayout = vk::ImageLayout::eUndefined,
-+        });
-+        hudless_format = raw;
-+        hudless_width = w;
-+        hudless_height = h;
-+    }
-+    scheduler.EndRendering();
-+    runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
-+                    vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
-+    runtime.FlushBarriers();
-+    const auto cmdbuf = scheduler.CommandBuffer();
-+    const auto layout = [&](vk::ImageLayout from, vk::ImageLayout to, vk::AccessFlags2 src,
-+                            vk::AccessFlags2 dst) {
-+        const vk::ImageMemoryBarrier2 barrier{
-+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-+            .srcAccessMask = src,
-+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-+            .dstAccessMask = dst,
-+            .oldLayout = from,
-+            .newLayout = to,
-+            .image = vk::Image(hudless_image),
-+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-+        };
-+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
-+    };
-+    layout(vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
-+           vk::AccessFlagBits2::eNone, vk::AccessFlagBits2::eTransferWrite);
-+    // A raw copy: the sRGB buffer's bytes as they are, like the presented frame's.
-+    const vk::ImageCopy copy{
-+        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-+        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-+        .extent = {w, h, 1},
-+    };
-+    cmdbuf.copyImage(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
-+                     vk::Image(hudless_image), vk::ImageLayout::eTransferDstOptimal, copy);
-+    layout(vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eTransferSrcOptimal,
-+           vk::AccessFlagBits2::eTransferWrite, vk::AccessFlagBits2::eTransferRead);
-+    fg_inputs.hudless = vk::Image(hudless_image);
-+    fg_inputs.hudless_format = raw;
-+    fg_inputs.hudless_width = w;
-+    fg_inputs.hudless_height = h;
++    // The display buffer before the HUD: frame generation's picture without UI (10-bit and
++    // HDR buffers are skipped, and the HUD then stays in the interpolated frames).
++    CaptureHudless(display);
 +}
 +
 +void TemporalUpscaler::CreateDcPipelines() {
@@ -2923,6 +3443,9 @@ index 7c2da3f..8a4a9b5 100644
 +    fg_ready = true;
 +    fg_display_draws = 0;
 +    ++fg_handed;
++    if (frame_generator && frame_generator->Wanted()) {
++        CaptureDcFrameGen(cmdbuf, w, h, reset);
++    }
 +
 +    bool dispatched = false;
 +    if (UseFsr4()) {
@@ -3046,7 +3569,7 @@ index 7c2da3f..8a4a9b5 100644
 +
  } // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.h b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.h
-index 6eca99d..affaa6a 100644
+index 6eca99d..56ca1fd 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.h
 @@ -70,6 +70,68 @@ public:
@@ -3118,7 +3641,16 @@ index 6eca99d..affaa6a 100644
      /// Start of a frame in the command stream (display pass).
      bool OnFrameStart();
      bool RasterScaling() const;
-@@ -210,6 +272,14 @@ private:
+@@ -148,6 +210,8 @@ private:
+     void Run();
+     /// The scene depth and the motion vectors for frame generation (also with the upscaler off).
+     void CaptureFrameGen();
++    /// Driveclub: frame generation's inputs from RunDriveclub (depth copy, motion vectors).
++    void CaptureDcFrameGen(vk::CommandBuffer cmdbuf, u32 w, u32 h, bool history_reset);
+     /// The UI target before the first UI draw (frame generation's picture without UI):
+     /// `color` (a texture cache image) at 1080p, the port's output-size UI image otherwise.
+     void CaptureHudless(VideoCore::ImageId color);
+@@ -210,6 +274,14 @@ private:
      bool frame_gen_captured = false; ///< this frame's depth and motion are taken
      bool hudless_pending = false;    ///< the UI started; its picture is taken at its next draw
      u64 trigger_hash = 0x9a9cf8a9;
@@ -3133,7 +3665,7 @@ index 6eca99d..affaa6a 100644
      VideoCore::ImageId scene_color{};
      bool done_this_frame = false;
      u32 preset_file_frames = 0; ///< BB_PRESET_FILE polling
-@@ -271,6 +341,14 @@ private:
+@@ -271,6 +343,11 @@ private:
      VideoCore::UniqueImage motion_image;
      VideoCore::UniqueImage output_image;
      vk::UniqueImageView motion_view;
@@ -3142,9 +3674,6 @@ index 6eca99d..affaa6a 100644
 +    FrameGenInputs fg_inputs{};
 +    bool fg_ready = false;
 +    u32 fg_display_draws = 0;       ///< draws into the display buffer since the scene resolve
-+    VideoCore::UniqueImage hudless_image; ///< frame generation's HUD-less copy
-+    vk::Format hudless_format{};
-+    u32 hudless_width = 0, hudless_height = 0;
      vk::UniqueImageView output_view;
      VideoCore::UniqueImage opaque_image;   ///< scene color before the blended draws
      VideoCore::UniqueImage reactive_image; ///< R8 reactive mask
@@ -3449,7 +3978,7 @@ index 45fd566..a8a94e7 100644
      auto [view_result, view] = instance.GetDevice().createImageViewUnique(image_view_ci);
      ASSERT_MSG(view_result == vk::Result::eSuccess, "Failed to create image view: {}",
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-index 6c56743..d5f5f07 100644
+index 6c56743..ea69c29 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 @@ -317,6 +317,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
@@ -3461,19 +3990,63 @@ index 6c56743..d5f5f07 100644
          if (new_info.num_samples == 1 &&
              (new_info.resources.layers > old_image.info.resources.layers ||
               new_info.resources.levels > old_image.info.resources.levels)) {
-@@ -577,6 +579,11 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
+@@ -555,12 +557,19 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
+                     return {merged_image_id, -1, -1};
+                 }
  
+-                // We need to have a larger, already allocated image to copy this one into
+-                if (merged_image_id) {
+-                    auto& merged_image = slot_images[merged_image_id];
+-                    runtime.CopyMip(&cache_image, &merged_image, mip, slice);
+-                    FreeImage(cache_image_id);
++                // If we don't have an allocated image, we create one here
++                // Otherwise it's later created from guest memory and the GPU data is lost
++                // And reads/writes go to different images.
++                if (!merged_image_id) {
++                    merged_image_id =
++                        slot_images.Insert(instance, runtime, slot_image_views, image_info);
++                    RegisterImage(merged_image_id);
++                    RefreshImage(slot_images[merged_image_id]);
++                    TrackImage(merged_image_id);
+                 }
++                auto& merged_image = slot_images[merged_image_id];
++                runtime.CopyMip(&cache_image, &merged_image, mip, slice);
++                FreeImage(cache_image_id);
+             }
+         }
+     }
+@@ -575,8 +584,18 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
+     auto& src_image = slot_images[image_id];
+     auto& new_image = slot_images[new_image_id];
+ 
++    // Only carry over the old contents when they hold GPU-written data that guest memory lacks.
++    // A CPU-dirty source is stale (e.g. a streamed texture rewritten in a reused pool slot);
++    // copying it would overwrite the fresh upload with old data (shadPS4 #5444).
++    const bool src_has_gpu_data = src_image.HasGpuValidData();
++
      RefreshImage(new_image);
-     runtime.CopyImage(&src_image, &new_image);
-+    // The copy holds the newest contents. Keep the source's GPU-written state and usage, or a
-+    // later CPU write to these pages would re-upload stale guest memory over the GPU result.
-+    new_image.flags &= ~ImageFlagBits::Dirty;
-+    new_image.flags |= src_image.flags & ImageFlagBits::GpuModified;
+-    runtime.CopyImage(&src_image, &new_image);
++    if (src_has_gpu_data) {
++        runtime.CopyImage(&src_image, &new_image);
++    }
++    // Keep the source's usage, and its GPU-written state when it was copied, or a later CPU
++    // write to these pages would re-upload stale guest memory over the GPU result.
 +    new_image.usage = src_image.usage;
  
      if (src_image.binding.is_bound || src_image.binding.is_target) {
          src_image.binding.needs_rebind = 1u;
-@@ -885,7 +892,8 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
+@@ -584,7 +603,9 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
+ 
+     TrackImage(new_image_id);
+     new_image.flags &= ~ImageFlagBits::Dirty;
+-    new_image.flags |= src_image.flags & ImageFlagBits::GpuModified;
++    if (src_has_gpu_data) {
++        new_image.flags |= ImageFlagBits::GpuModified;
++    }
+     FreeImage(image_id);
+ 
+     return new_image_id;
+@@ -885,7 +906,8 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
  }
  
  void TextureCache::AssociateStencil(ImageId depth_id, const ImageInfo& depth_info) {
@@ -3483,7 +4056,7 @@ index 6c56743..d5f5f07 100644
          return;
      }
      ImageId stencil_id{};
-@@ -1217,13 +1225,22 @@ void TextureCache::GarbageCollectImages() {
+@@ -1217,13 +1239,22 @@ void TextureCache::GarbageCollectImages() {
          // ~1 GB after its 8 GB system reserve: usage stayed above the critical mark, so the
          // collector evicted images used two or three frames ago on every submission and wrote
          // GPU-written ones back. Compare with the driver's current budget instead.
@@ -3537,7 +4110,7 @@ index 3a73ecf..3dd7e4c 100644
      g_window_thread = std::thread([title, width, height] {
          Common::SetCurrentThreadName("bb:window");
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 651b74e..da239d3 100644
+index 651b74e..c3a61d5 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
 @@ -9,10 +9,12 @@
@@ -3655,15 +4228,141 @@ index 651b74e..da239d3 100644
      bool show_motion = s.debug_view == BbSettings::DebugMotion;
      if (ImGui::Checkbox("Show motion vectors (debug)", &show_motion)) {
          s.debug_view = show_motion ? BbSettings::DebugMotion : BbSettings::DebugNone;
-@@ -314,6 +334,7 @@ void Menu() {
-     Hint("Red/green: horizontal/vertical motion (8 pixels = full brightness). Blue: the pixel has accurate object motion, beyond camera motion. A moving object with no blue or red/green is treated as stationary and may leave trails.");
+@@ -315,57 +335,88 @@ void Menu() {
      ImGui::EndDisabled(); // upscaler off
  
-+    if (!dc_menu) {
      ImGui::SeparatorText("Frame generation");
-     static const char* frame_gens[] = {"Off", "FSR 3.1 (any GPU)", "DLSS (NVIDIA RTX 40/50)"};
-     const int frame_gen = s.frame_gen;
-@@ -404,6 +425,10 @@ void Menu() {
+-    static const char* frame_gens[] = {"Off", "FSR 3.1 (any GPU)", "DLSS (NVIDIA RTX 40/50)"};
+-    const int frame_gen = s.frame_gen;
+-    if (ImGui::BeginCombo("Frame generation", frame_gens[frame_gen])) {
+-        for (int i = 0; i < BbSettings::FrameGenCount; ++i) {
+-            const bool supported = i != BbSettings::FrameGenDlss || s.dlssg_max_multiplier > 1;
+-            ImGui::BeginDisabled(!supported);
+-            if (ImGui::Selectable(frame_gens[i], i == frame_gen)) {
+-                Store(s.frame_gen, i, true);
++    if (dc_menu) {
++        // DCport: FSR 3.1 at 2x only; its depth and motion come from RunDriveclub (FSR modes).
++        static const char* dc_frame_gens[] = {"Off", "FSR 3.1"};
++        const int choice = s.frame_gen != BbSettings::FrameGenOff ? 1 : 0;
++        if (ImGui::BeginCombo("Frame generation", dc_frame_gens[choice])) {
++            for (int i = 0; i < 2; ++i) {
++                if (ImGui::Selectable(dc_frame_gens[i], i == choice)) {
++                    Store(s.frame_gen, i ? int(BbSettings::FrameGenFsr3) : int(BbSettings::FrameGenOff),
++                          true);
++                }
+             }
+-            ImGui::EndDisabled();
+-            if (!supported) {
+-                ImGui::SameLine();
+-                ImGui::TextDisabled("- unsupported by this GPU");
++            ImGui::EndCombo();
++        }
++        Hint("Shows a generated frame between two of the game's frames: 60 FPS looks like 120. Needs an FSR anti-aliasing mode and a display with twice the frame rate (120 Hz at 60 FPS). Adds a little input lag. Menus and videos are not generated.");
++        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
++                           "Not fully tested yet: try it, and turn it off if a race crashes.");
++        if (s.frame_gen != BbSettings::FrameGenOff && s.frame_gen_display_hz > 0) {
++            if (s.frame_gen_now > 0) {
++                ImGui::TextDisabled("On: 2x on a %d Hz display", s.frame_gen_display_hz.load());
++            } else {
++                ImGui::TextDisabled("Paused: a %d Hz display has no room for the extra frames at "
++                                    "this frame rate",
++                                    s.frame_gen_display_hz.load());
+             }
+         }
+-        ImGui::EndCombo();
+-    }
+-    Hint("Generates frames between two of the game's frames: 60 FPS on screen becomes 120. Needs a display with that refresh rate (120 Hz or more at 60 FPS); it pauses when the display cannot show the extra frames, and 3x/4x drop to what it can. Adds a little input latency. Menus and movies are not generated.");
+-    const int max_multiplier =
+-        s.frame_gen == BbSettings::FrameGenDlss ? s.dlssg_max_multiplier.load() : 2;
+-    ImGui::BeginDisabled(s.frame_gen == BbSettings::FrameGenOff || max_multiplier <= 2);
+-    int multiplier = std::min(s.frame_gen_multiplier.load(), max_multiplier);
+-    if (ImGui::SliderInt("Multiplier", &multiplier, 2, std::max(max_multiplier, 2), "%dx")) {
+-        Store(s.frame_gen_multiplier, multiplier, true);
+-    }
+-    ImGui::EndDisabled();
+-    ImGui::BeginDisabled(s.frame_gen == BbSettings::FrameGenOff);
+-    Checkbox("Fit to display refresh", s.frame_gen_fit_display);
+-    ImGui::EndDisabled();
+-    Hint("On: no more frames than the display shows (an uncapped game gets fewer generated frames, and the GPU does less). Off: the multiplier as chosen; past the refresh rate the display shows the newest frames.");
+-    // What runs now (fitted: at most the frames the display shows between two of the game's).
+-    if (s.frame_gen != BbSettings::FrameGenOff && s.frame_gen_display_hz > 0) {
+-        const int now = std::min(s.frame_gen_now.load(), multiplier - 1);
+-        if (now > 0 && s.frame_gen_flip_limit > 0) {
+-            ImGui::TextDisabled("Now %dx on a %d Hz display; V-Sync (FIFO) caps the game at %d FPS",
+-                                now + 1, s.frame_gen_display_hz.load(),
+-                                s.frame_gen_flip_limit.load());
+-        } else if (now > 0) {
+-            ImGui::TextDisabled("Now %dx on a %d Hz display", now + 1,
+-                                s.frame_gen_display_hz.load());
+-        } else if (s.frame_gen_fit_display) {
+-            ImGui::TextDisabled("Paused: no room on a %d Hz display at this frame rate",
+-                                s.frame_gen_display_hz.load());
+-        } else {
+-            ImGui::TextDisabled("Paused: presenting fell behind (V-Sync on a slower display?)");
++        if (const char* problem = s.frame_gen_problem.load()) {
++            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "%s", problem);
++        }
++    } else {
++        static const char* frame_gens[] = {"Off", "FSR 3.1 (any GPU)", "DLSS (NVIDIA RTX 40/50)"};
++        const int frame_gen = s.frame_gen;
++        if (ImGui::BeginCombo("Frame generation", frame_gens[frame_gen])) {
++            for (int i = 0; i < BbSettings::FrameGenCount; ++i) {
++                const bool supported = i != BbSettings::FrameGenDlss || s.dlssg_max_multiplier > 1;
++                ImGui::BeginDisabled(!supported);
++                if (ImGui::Selectable(frame_gens[i], i == frame_gen)) {
++                    Store(s.frame_gen, i, true);
++                }
++                ImGui::EndDisabled();
++                if (!supported) {
++                    ImGui::SameLine();
++                    ImGui::TextDisabled("- unsupported by this GPU");
++                }
++            }
++            ImGui::EndCombo();
++        }
++        Hint("Generates frames between two of the game's frames: 60 FPS on screen becomes 120. Needs a display with that refresh rate (120 Hz or more at 60 FPS); it pauses when the display cannot show the extra frames, and 3x/4x drop to what it can. Adds a little input latency. Menus and movies are not generated.");
++        const int max_multiplier =
++            s.frame_gen == BbSettings::FrameGenDlss ? s.dlssg_max_multiplier.load() : 2;
++        ImGui::BeginDisabled(s.frame_gen == BbSettings::FrameGenOff || max_multiplier <= 2);
++        int multiplier = std::min(s.frame_gen_multiplier.load(), max_multiplier);
++        if (ImGui::SliderInt("Multiplier", &multiplier, 2, std::max(max_multiplier, 2), "%dx")) {
++            Store(s.frame_gen_multiplier, multiplier, true);
++        }
++        ImGui::EndDisabled();
++        ImGui::BeginDisabled(s.frame_gen == BbSettings::FrameGenOff);
++        Checkbox("Fit to display refresh", s.frame_gen_fit_display);
++        ImGui::EndDisabled();
++        Hint("On: no more frames than the display shows (an uncapped game gets fewer generated frames, and the GPU does less). Off: the multiplier as chosen; past the refresh rate the display shows the newest frames.");
++        // What runs now (fitted: at most the frames the display shows between two of the game's).
++        if (s.frame_gen != BbSettings::FrameGenOff && s.frame_gen_display_hz > 0) {
++            const int now = std::min(s.frame_gen_now.load(), multiplier - 1);
++            if (now > 0 && s.frame_gen_flip_limit > 0) {
++                ImGui::TextDisabled("Now %dx on a %d Hz display; V-Sync (FIFO) caps the game at %d FPS",
++                                    now + 1, s.frame_gen_display_hz.load(),
++                                    s.frame_gen_flip_limit.load());
++            } else if (now > 0) {
++                ImGui::TextDisabled("Now %dx on a %d Hz display", now + 1,
++                                    s.frame_gen_display_hz.load());
++            } else if (s.frame_gen_fit_display) {
++                ImGui::TextDisabled("Paused: no room on a %d Hz display at this frame rate",
++                                    s.frame_gen_display_hz.load());
++            } else {
++                ImGui::TextDisabled("Paused: presenting fell behind (V-Sync on a slower display?)");
++            }
++        }
++        if (const char* problem = s.frame_gen_problem.load()) {
++            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "%s", problem);
+         }
+-    }
+-    if (const char* problem = s.frame_gen_problem.load()) {
+-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "%s", problem);
+     }
+ 
++    if (!dc_menu) {
+     ImGui::SeparatorText("Output resolution");
+     static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160",
+                                     "2560 x 1080 (21:9)", "3440 x 1440 (21:9)",
+@@ -404,6 +455,10 @@ void Menu() {
          ImGui::EndCombo();
      }
      Hint("On: output and presets change without restarting, while game post-processing stays at 1080p. Off: the scene is patched to the preset resolution at startup. Auto enables the live path on capable discrete GPUs. Changes apply after restarting the game.");
@@ -3674,7 +4373,7 @@ index 651b74e..da239d3 100644
      ImGui::SeparatorText("Game effects (restart required)");
      static const char* lods[] = {"Highest (-2)", "Original", "Lower (1)", "Lowest (2)"};
      static constexpr int lod_values[] = {-2, 0, 1, 2};
-@@ -428,6 +453,7 @@ void Menu() {
+@@ -428,6 +483,7 @@ void Menu() {
      }
      Hint("Effects are applied through game patches at startup (patches/Bloodborne.xml). Motion blur and dynamic shadows can increase GPU load.");
      Hint("Free camera: hold Cross and press L3 (keyboard: Space + Z). Debug menu: left touchpad / Tab. Requires DbgFont14h.ccm and DbgFont14h.tpf in dvdroot_ps4/font from the debug-font mod. Right touchpad: Backspace.");
@@ -3682,7 +4381,7 @@ index 651b74e..da239d3 100644
  
      bool restart = s.object_motion != s.startup_object_motion ||
                     s.model_lod != s.startup_model_lod || s.fov != s.startup_fov ||
-@@ -445,6 +471,7 @@ void Menu() {
+@@ -445,6 +501,7 @@ void Menu() {
          }
      }
  
@@ -3690,7 +4389,7 @@ index 651b74e..da239d3 100644
      ImGui::SeparatorText("Other");
      Checkbox("Show FPS counter", s.show_fps);
      Checkbox("Mute when the game is in the background", s.mute_unfocused);
-@@ -482,7 +509,7 @@ void Menu() {
+@@ -482,7 +539,7 @@ void Menu() {
          quit_armed = false;
      }
      ImGui::SameLine();
@@ -3699,7 +4398,7 @@ index 651b74e..da239d3 100644
      ImGui::End();
      if (!keep_open) {
          SetOpen(false);
-@@ -525,13 +552,32 @@ void FpsCounter() {
+@@ -525,13 +582,32 @@ void FpsCounter() {
                       ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                       ImGuiWindowFlags_NoFocusOnAppearing);
      const auto& s = BbSettings::Get();
@@ -3739,7 +4438,7 @@ index 651b74e..da239d3 100644
      ImGui::End();
  }
  
-@@ -548,14 +594,54 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -548,14 +624,54 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      io.IniFilename = nullptr; // window positions are not kept
      io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
      io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -3797,7 +4496,7 @@ index 651b74e..da239d3 100644
      ImFontConfig font_config;
      font_config.FontDataOwnedByAtlas = false;
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index 5b985a4..3e9d0bb 100644
+index 5b985a4..9294352 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -14,7 +14,7 @@ namespace {
@@ -3809,32 +4508,27 @@ index 5b985a4..3e9d0bb 100644
  }
  
  float Clamp(float v, float lo, float hi) {
-@@ -31,11 +31,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+@@ -31,6 +31,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
              }
          }
      } else if (key == "frame_gen") {
--        for (int g = 0; g < FrameGenCount; ++g) {
--            if (value == FrameGenName(g)) {
--                v.frame_gen = g;
--            }
--        }
-+        // DCport: frame generation stays off (FSR 3.1 interpolation lost the device on
-+        // RX 6000, 0.3.x); older dcport.ini files keep the key.
-     } else if (key == "frame_gen_multiplier") {
-         v.frame_gen_multiplier = std::clamp(i, 2, 4);
-     } else if (key == "frame_gen_fit_display") {
-@@ -62,6 +59,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
++        // DCport 0.4.6: bbport's frame generation, fed by RunDriveclub (off by default). The
++        // 0.3.x key values "0"/"1" (our old FSR 3.1 one) do not match a name: they stay off.
+         for (int g = 0; g < FrameGenCount; ++g) {
+             if (value == FrameGenName(g)) {
+                 v.frame_gen = g;
+@@ -62,6 +64,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
          v.debug_view = std::clamp(i, 0, DebugViewCount - 1);
      } else if (key == "show_fps") {
          v.show_fps = i != 0;
 +    } else if (key == "frame_gen_image_only") {
-+        // DCport 0.3.x key; frame generation stays off (see "frame_gen" above).
++        // DCport 0.3.x key, no longer used (dropped at the next save).
 +    } else if (key == "motion_blur") {
 +        v.motion_blur = Clamp(f, 0.0f, 2.0f); // older files: 1 (on) or 0 (off)
      } else if (key == "mute_unfocused") {
          v.mute_unfocused = i != 0;
      } else if (key == "button_prompts") {
-@@ -206,31 +207,59 @@ bool ResolutionNeedsRestart() {
+@@ -206,31 +212,62 @@ bool ResolutionNeedsRestart() {
           (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa));
  }
  
@@ -3890,6 +4584,9 @@ index 5b985a4..3e9d0bb 100644
 -                 v.debug_view.load(), int(v.show_fps.load()),
 +                 v.debug_view.load(), int(v.show_fps.load()), double(v.motion_blur.load()),
                   int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()));
++    std::fprintf(file, "frame_gen=%s\nframe_gen_multiplier=%d\nframe_gen_fit_display=%d\n",
++                 FrameGenName(v.frame_gen), v.frame_gen_multiplier.load(),
++                 int(v.frame_gen_fit_display.load()));
      // Read by patches.py at start.
      for (int e = 0; e < EffectCount; ++e) {
          std::fprintf(file, "%s=%d\n", Effects[e].key, int(v.effects[e].load()));
@@ -3900,7 +4597,7 @@ index 5b985a4..3e9d0bb 100644
      std::fprintf(file, "model_lod=%d\noutput_res=%dx%d\n", v.model_lod.load(),
                   OutputWidths[v.output_res], OutputHeights[v.output_res]);
      std::fprintf(file, "mute_unfocused=%d\n", int(v.mute_unfocused.load()));
-@@ -243,6 +272,7 @@ void Save() {
+@@ -243,6 +280,7 @@ void Save() {
      // Read by run.sh at start.
      std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                    : v.live_resolution ? "1" : "0");
@@ -3959,6 +4656,20 @@ index 57a9486..c458a76 100644
  struct WaitTimer {
      std::atomic<std::uint64_t>& total;
      std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+diff --git a/gpu/shim/core/emulator_settings.h b/gpu/shim/core/emulator_settings.h
+index 4d583c1..325bf4e 100644
+--- a/gpu/shim/core/emulator_settings.h
++++ b/gpu/shim/core/emulator_settings.h
+@@ -30,6 +30,9 @@ public:
+     // bbport: Relaxed by default: without readbacks FaceGen reads stale GPU-written vertices
+     // (vertex explosions); in Hunter's Nightmare it costs no measurable frame rate.
+     u32 GetReadbacksMode() { static const auto value = u32(Number("BB_READBACKS", GpuReadbacksMode::Relaxed)); return value; }
++    // DCport (from GR2fork): with readbacks on, the faulting thread waits for its own download
++    // while the GPU thread keeps running. BB_READBACK_OFFLOAD=0: the synchronous download.
++    bool IsReadbackOffload() { static const bool value = GetReadbacksMode() != GpuReadbacksMode::Disabled && Flag("BB_READBACK_OFFLOAD", true); return value; }
+     // bbport: BB_VBLANK_HZ=0 (uncapped presets): vblank runs at 480 Hz so a finished frame is
+     // shown within ~2 ms instead of waiting for the next display-rate vblank (below the display
+     // rate frames alternated 10/20 ms at 100 Hz: judder), and GetFrameLimit() caps the rate at
 diff --git a/gpu/shim/core/user_manager.h b/gpu/shim/core/user_manager.h
 index 2e19d49..d234bb3 100644
 --- a/gpu/shim/core/user_manager.h
