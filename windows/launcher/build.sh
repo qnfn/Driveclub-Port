@@ -10,6 +10,6 @@ write_edition() {
 trap 'write_edition True' EXIT
 write_edition "$val"
 python -m PyInstaller --noconfirm --onefile --windowed --name DriveClub --icon assets/dcport.ico \
-    --paths prepare --add-data "assets;assets" --add-data "input-default.ini;." \
+    --paths prepare --exclude-module numpy --add-data "assets;assets" --add-data "input-default.ini;." \
     --distpath "dist/$ed" --workpath "build/$ed" dcport/__main__.py
 ls -l "dist/$ed/DriveClub.exe"

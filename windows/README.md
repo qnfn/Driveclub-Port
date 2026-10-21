@@ -7,6 +7,11 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.4.4
+
+- **4:3 and 16:10.** SETUP > Aspect ratio now also has 4:3 and 16:10. The 3D scene renders at the narrower shape with the correct proportions; nothing is stretched. Known issue: the HUD and some menus are cut off at the left and right edges (the game lays them out for 16:9). Requested by @juanme555 (#2).
+- **GPU readbacks (missing roadside grass).** SETUP > GPU readbacks (Off / On, off by default). On brings back the grass and bushes along the road edges, and maybe other missing graphics. Expect an FPS loss with it On; how much depends on your PC. Reported by @darkresident (#3).
+
 ## 0.4.3
 
 - **Ultrawide monitors (21:9 and 32:9).** SETUP > Display has a new **Aspect ratio** choice (16:9 / 21:9 / 32:9) and a **Field of view** slider. The game renders its 3D scene at the full wide size (2560x1080 or 3440x1440 for 21:9, 3840x1080 or 5120x1440 for 32:9), not a stretched 16:9 picture, and the camera matches the screen, so cars and wheels keep their shape. The HUD and menus stay in the middle 16:9 area. Requested by @marcelofis (#1).

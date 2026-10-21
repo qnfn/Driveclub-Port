@@ -77,21 +77,27 @@ RESOLUTIONS = (
 )
 DEFAULT_RESOLUTION = "1080p"
 
-# Ultrawide (SETUP > Aspect ratio): the game's camera aspect, a wider field of view, its scene
-# rendered at the wide size and display buffers to match, written straight into the 01.28
-# eboot. After rafidwayne's Driveclub_Widescreen and the Driveclub-PC wrapper's extension of
-# it (both GPL-2.0-or-later). The HUD stays in the centred 16:9 area.
-ASPECTS = ("16:9", "21:9", "32:9")
+# Other aspect ratios (SETUP > Aspect ratio): the game's camera aspect, the field of view, its
+# scene rendered at the output's shape and display buffers to match, written straight into the
+# 01.28 eboot. After rafidwayne's Driveclub_Widescreen and the Driveclub-PC wrapper's extension
+# of it (both GPL-2.0-or-later). The HUD stays in the centred 16:9 area: on the narrow shapes
+# (4:3, 16:10) that area is wider than the screen, so its left and right edges are cut off.
+ASPECTS = ("4:3", "16:10", "16:9", "21:9", "32:9")
+NARROW_ASPECTS = ("4:3", "16:10")
 DEFAULT_ASPECT = "16:9"
-# The output of a wide shape at the render resolution's lines (common monitor sizes); the
-# memory budget holds up to 1440 wide lines, so 4K falls back to them.
-WIDE_OUTPUTS = {
+# The output of a shape at the render resolution's lines (common monitor sizes for the wide
+# ones); the memory budget holds up to 1440 lines, so 4K falls back to them.
+OUTPUTS = {
+    ("4:3", 1080): (1440, 1080), ("4:3", 1440): (1920, 1440),
+    ("16:10", 1080): (1728, 1080), ("16:10", 1440): (2304, 1440),
     ("21:9", 1080): (2560, 1080), ("21:9", 1440): (3440, 1440),
     ("32:9", 1080): (3840, 1080), ("32:9", 1440): (5120, 1440),
 }
 # The game's field-of-view factor is 0.5 at 16:9; the value of the community "FOV fix for wide
 # resolutions" (0.65625) is the default for both wide shapes, tested on 32:9 by players. Hor+
 # (the 16:9 view widened to the screen) is 0.5 * aspect / (16 / 9): 0.67 at 21:9, 1.0 at 32:9.
+# The factor sets the horizontal view, so the narrow shapes keep 0.5: the 16:9 view with more
+# above and below (Vert+).
 DEFAULT_FOV = 0.65625
 FOV_MIN, FOV_MAX = 0.5, 1.0
 
@@ -112,7 +118,15 @@ _HEIGHT_SITE = 0x4dc37a
 class Display:
     size: tuple[int, int]  # the game's output (display buffers)
     lines: int  # render lines: 1080, 1440 or 2160
-    wide: bool
+    custom: bool  # not 16:9: the aspect writes (wide_writes)
+
+    @property
+    def wide(self) -> bool:
+        return self.custom and self.size[0] * 9 > self.size[1] * 16
+
+    @property
+    def narrow(self) -> bool:
+        return self.custom and not self.wide
 
 # The window in windowed mode; fullscreen always covers the monitor.
 WINDOW_SIZES = ((1280, 720), (1600, 900), (1920, 1080), (2560, 1440), (3840, 2160))
@@ -141,21 +155,27 @@ def fov(s: LauncherSettings) -> float:
     return min(max(float(s.fov), FOV_MIN), FOV_MAX)
 
 
+def fov_factor(s: LauncherSettings) -> float:
+    """The factor written for the session: the slider on wide shapes, 0.5 on narrow ones."""
+    return FOV_MIN if display(s).narrow else fov(s)
+
+
 def display(s: LauncherSettings) -> Display:
     r = resolution(s.render_res)
     lines = r.size[1]
     shape = aspect(s)
     if shape == DEFAULT_ASPECT:
         return Display(r.size, lines, False)
-    lines = max(n for s, n in WIDE_OUTPUTS if s == shape and n <= lines)
-    return Display(WIDE_OUTPUTS[shape, lines], lines, True)
+    lines = max(n for s, n in OUTPUTS if s == shape and n <= lines)
+    return Display(OUTPUTS[shape, lines], lines, True)
 
 
 def screen_aspect(w: int, h: int) -> str:
-    """The Aspect ratio setting for a screen: 32:9 from 3:1 up, 21:9 from 2.2:1, else 16:9
-    (16:10 and narrower show the 16:9 picture with bars)."""
+    """The Aspect ratio setting for a screen: 32:9 from 3:1 up, 21:9 from 2.2:1, 16:9 from
+    1.7:1, 16:10 from 1.5:1, else 4:3 (5:4 shows the 4:3 picture with bars)."""
     ratio = w / h
-    return "32:9" if ratio >= 3.0 else "21:9" if ratio >= 2.2 else "16:9"
+    return "32:9" if ratio >= 3.0 else "21:9" if ratio >= 2.2 else "16:9" if ratio >= 1.7 \
+        else "16:10" if ratio >= 1.5 else "4:3"
 
 
 def screen_hint(screen: "tuple[int, int] | None", s: LauncherSettings) -> "tuple[str, str] | None":
@@ -168,7 +188,10 @@ def screen_hint(screen: "tuple[int, int] | None", s: LauncherSettings) -> "tuple
     if wanted == chosen:
         return (f"Screen {w}x{h}: aspect ratio {chosen}", "ok") if chosen != DEFAULT_ASPECT else None
     if wanted == DEFAULT_ASPECT:
-        return (f"Screen {w}x{h} is not ultrawide: set SETUP > Aspect ratio to 16:9", "warn")
+        return (f"Screen {w}x{h} is 16:9: set SETUP > Aspect ratio to 16:9", "warn")
+    if wanted in NARROW_ASPECTS:  # optional: the HUD's edges are cut off there
+        return (f"Screen {w}x{h}: SETUP > Aspect ratio {wanted} fills it (the menu and HUD "
+                "edges are cut off)", "ok" if chosen == DEFAULT_ASPECT else "warn")
     return (f"Ultrawide screen {w}x{h}: set SETUP > Aspect ratio to {wanted} for the full "
             "picture", "warn")
 
@@ -177,7 +200,7 @@ def window(s: LauncherSettings) -> tuple[int, int]:
     """The windowed-mode size: the chosen lines at the output's aspect."""
     w, h = window_size(s.window_size)
     d = display(s)
-    if d.wide:
+    if d.custom:
         w = round(h * d.size[0] / d.size[1] / 2) * 2
     return w, h
 
@@ -189,9 +212,12 @@ def hor_plus(s: LauncherSettings) -> float:
 
 
 def _scene_width(table_width: int, w: int, h: int) -> int:
-    # Rounded to a multiple of 128 like the engine's own -resolutionscale widths.
-    wide = int((table_width * (w / h) / (16 / 9) + 64) // 128) * 128
-    return max(wide, table_width)
+    # Wider: rounded to a multiple of 128 like the engine's own -resolutionscale widths.
+    # Narrower: to 32, so 4:3 keeps its exact 1440 (x 1.3333 = 1920 at 1440 lines).
+    scaled = table_width * (w / h) / (16 / 9)
+    if scaled < table_width:
+        return int((scaled + 16) // 32) * 32
+    return max(int((scaled + 64) // 128) * 128, table_width)
 
 
 def _height_code(w: int, h: int) -> bytes:
@@ -204,14 +230,14 @@ def _height_code(w: int, h: int) -> bytes:
 
 
 def wide_writes(s: LauncherSettings) -> list[tuple[int, bytes]]:
-    """The ultrawide writes (image offset, bytes) for the session; none at 16:9."""
+    """The aspect-ratio writes (image offset, bytes) for the session; none at 16:9."""
     d = display(s)
-    if not d.wide:
+    if not d.custom:
         return []
     w, h = d.size
     writes = [
         (_ASPECT, struct.pack("<f", w / h)),
-        (_FOV, struct.pack("<f", fov(s))),
+        (_FOV, struct.pack("<f", fov_factor(s))),
         (_VIDEO_OUT[0], struct.pack("<I", w)),
         (_VIDEO_OUT[1], struct.pack("<I", h)),
         (_SCENE_WIDTHS, struct.pack("<4I", *(_scene_width(t, w, h) for t in _TABLE_WIDTHS))),
@@ -221,7 +247,9 @@ def wide_writes(s: LauncherSettings) -> list[tuple[int, bytes]]:
     return writes
 
 
-def _memory_patch(w: int, h: int) -> tuple[str, int]:
+def _memory_patch(w: int, h: int) -> "tuple[str, int] | None":
+    if w * h <= 1920 * 1080:  # the game's own budget
+        return None
     if w * h <= 2560 * 1440:
         return "Memory for up to 1440p", 3000
     return "Memory for up to 4K", 5000
@@ -235,8 +263,9 @@ def patch_names(s: LauncherSettings) -> list[str]:
     known = {t.name for t in TOGGLES}
     names += [n for n in s.patches if n in known]
     d = display(s)
-    if d.wide:  # the display buffers are in wide_writes
-        names.append(_memory_patch(*d.size)[0])
+    if d.custom:  # the display buffers are in wide_writes
+        if memory := _memory_patch(*d.size):
+            names.append(memory[0])
     else:
         names += resolution(s.render_res).patches
     return names
@@ -244,15 +273,16 @@ def patch_names(s: LauncherSettings) -> list[str]:
 
 def game_args(s: LauncherSettings) -> str:
     d = display(s)
-    if d.wide:
+    if d.custom:
         return "-resolutionscale 1.3333" if d.lines == 1440 else ""
     return resolution(s.render_res).game_args
 
 
 def dmem_mb(s: LauncherSettings) -> int:
     d = display(s)
-    if d.wide:
-        return DEFAULT_DMEM_MB + _memory_patch(*d.size)[1]
+    if d.custom:
+        memory = _memory_patch(*d.size)
+        return DEFAULT_DMEM_MB + (memory[1] if memory else 0)
     return DEFAULT_DMEM_MB + resolution(s.render_res).extra_dmem_mb
 
 

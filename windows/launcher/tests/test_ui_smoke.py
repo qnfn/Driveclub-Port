@@ -17,7 +17,7 @@ from dcport.ini import read_ini
 from dcport.paths import AppPaths
 from dcport.prepare_state import prepare_command, source_stamp
 from dcport.profiles import create_profile
-from dcport.runtime import game_command
+from dcport.runtime import game_command, game_env
 from dcport.settings import LauncherSettings, load_settings, save_settings
 from dcport.ui import theme
 from dcport.ui.app import App as _App
@@ -371,7 +371,7 @@ def test_run_task_reports_on_the_ui_thread(tmp_path):
 
 
 def test_version_and_bundled_resources(monkeypatch, tmp_path):
-    assert dcport.__version__ == "0.4.3"
+    assert dcport.__version__ == "0.4.4"
     assert theme.default_controls() == DEFAULT_INPUT.resolve()
     assert theme.assets_dir() == DEFAULT_INPUT.resolve().parent / "assets"
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
@@ -1075,6 +1075,23 @@ def test_setup_threading_switch_shows_the_choice(tmp_path):
             page.set_threading(value)
             assert page.threading_choice.value == value
             assert read_ini(paths.ini)["threaded_recording"] == value
+    finally:
+        app.destroy()
+
+
+def test_setup_readbacks_switch_off_by_default_and_reaches_the_runtime(tmp_path):
+    paths, _ = configured_port(tmp_path, prepared=True)
+    app = App(paths, fsr=False)
+    try:
+        app.show("setup"); page = app.pages["setup"]
+        assert page.readbacks_choice.value == "0" and "FPS" in page.readbacks_note.cget("text")
+        page.set_readbacks("1")
+        assert page.readbacks_choice.value == "1" and read_ini(paths.ini)["readbacks"] == "1"
+        env = game_env(paths, app.settings, fsr=False, base={})
+        assert env["BB_READBACKS"] == "1"
+        page.set_readbacks("0")
+        assert page.readbacks_choice.value == "0"
+        assert game_env(paths, app.settings, fsr=False, base={})["BB_READBACKS"] == "0"
     finally:
         app.destroy()
 

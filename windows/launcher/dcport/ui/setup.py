@@ -43,6 +43,17 @@ BLUR_NOTE = ("FSR does not run with the PATCHES page's 'No motion blur or "
              "depth of field': the game's anti-aliasing is in that shader.")
 
 
+READBACKS_CHOICES = (("0", "Off"), ("1", "On"))
+READBACKS_NOTE = ("GPU readbacks: the game gets the GPU's results back exactly when it asks. It "
+                  "restores the roadside grass (and maybe other missing graphics); expect an FPS "
+                  "loss. Off by default. Applies on the next PLAY.")
+
+
+def readbacks_value(ini: dict) -> str:
+    """dcport.ini readbacks: "1" (relaxed) or "0"; anything else (or missing) is Off."""
+    return "1" if ini.get("readbacks", "0").strip() == "1" else "0"
+
+
 def threading_value(ini: dict) -> str:
     """dcport.ini threaded_recording: "1", "0", or anything else (or missing) for Auto."""
     value = ini.get("threaded_recording", "auto").strip()
@@ -61,6 +72,9 @@ WIDE_NOTE = ("Ultrawide {w}x{h}: the game renders its scene at the full width an
              "stays in the middle 16:9 area. Field of view: {fov:.2f} (0.50 is the 16:9 view, "
              "{hor:.2f} keeps its height on this screen; higher shows more at the sides but "
              "stretches the edges). Applies on the next PLAY.")
+NARROW_NOTE = ("{shape} {w}x{h}: the game shows the 16:9 view with more above and below. The "
+               "menus and HUD stay 16:9 wide, so their left and right edges are cut off. "
+               "Applies on the next PLAY.")
 WIDE_HIGH_NOTE = " A higher Render is not available at this aspect ratio: it renders {lines} lines."
 
 
@@ -236,9 +250,17 @@ class SetupPage(tk.Frame):
         self.threading_choice = theme.Segmented(grid, app, THREADING_CHOICES, self.set_threading,
                                                 min_label="Fullscreen")
         self.threading_choice.grid(row=6, column=1, sticky="w", pady=(app.px(10), 0))
+        theme.text_label(grid, app, "GPU readbacks").grid(row=7, column=0, sticky="w",
+                                                          pady=(app.px(10), 0))
+        self.readbacks_choice = theme.Segmented(grid, app, READBACKS_CHOICES, self.set_readbacks,
+                                                min_label="Fullscreen")
+        self.readbacks_choice.grid(row=7, column=1, sticky="w", pady=(app.px(10), 0))
         self.threading_note = theme.text_label(card, app, THREADING_NOTE, font="small",
                                                fg="muted")
         self._wrapping(self.threading_note, card).pack(fill="x", pady=(app.px(12), 0))
+        self.readbacks_note = theme.text_label(card, app, READBACKS_NOTE, font="small",
+                                               fg="muted")
+        self._wrapping(self.readbacks_note, card).pack(fill="x", pady=(app.px(12), 0))
         self.render_note = theme.text_label(card, app, RENDER_NOTE, font="small", fg="muted")
         self._wrapping(self.render_note, card).pack(fill="x", pady=(app.px(12), 0))
         self.display_hint = theme.text_label(card, app, "More settings in game: press Insert, "
@@ -345,12 +367,13 @@ class SetupPage(tk.Frame):
         note = RENDER_HIGH_NOTE.format(label=render.label) if high else RENDER_NOTE
         self.aspect_choice.set(patches.aspect(s))
         display = patches.display(s)
-        self.fov.set(patches.fov(s))
+        self.fov.set(patches.fov_factor(s))
         self.fov.set_enabled(display.wide)
         self._fov_moved(self.fov.value)
-        if display.wide:
+        if display.custom:
             w, h = display.size
-            note = WIDE_NOTE.format(w=w, h=h, fov=patches.fov(s), hor=patches.hor_plus(s)) + \
+            note = (WIDE_NOTE.format(w=w, h=h, fov=patches.fov(s), hor=patches.hor_plus(s))
+                    if display.wide else NARROW_NOTE.format(shape=patches.aspect(s), w=w, h=h)) + \
                 (WIDE_HIGH_NOTE.format(lines=display.lines) if render.size[1] > display.lines else "") + \
                 ("\n\n" + note if high else "")
         hint = patches.screen_hint(app.screen, s)
@@ -360,6 +383,7 @@ class SetupPage(tk.Frame):
                                                              hint[1] == "warn" else "muted"])
         self.counter_choice.set(app.fps_counter_on())
         self.threading_choice.set(threading_value(app.game_ini()))
+        self.readbacks_choice.set(readbacks_value(app.game_ini()))
         if self.upscaler_choice is not None:
             self._refresh_upscaling()
         self._show_status()
@@ -629,6 +653,10 @@ class SetupPage(tk.Frame):
     def set_threading(self, value: str) -> None:
         self._show_status(self.app.update_game_ini({"threaded_recording": value}) or "")
         self.threading_choice.set(threading_value(self.app.game_ini()))
+
+    def set_readbacks(self, value: str) -> None:
+        self._show_status(self.app.update_game_ini({"readbacks": value}) or "")
+        self.readbacks_choice.set(readbacks_value(self.app.game_ini()))
 
     def set_player_name(self, text: str) -> None:
         name = "".join(c for c in text if c.isprintable()).strip()[:16]

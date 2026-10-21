@@ -107,10 +107,56 @@ def test_screen_hint():
     assert patches.screen_aspect(5120, 1440) == "32:9"
     assert patches.screen_aspect(2560, 1080) == "21:9"
     assert patches.screen_aspect(3440, 1440) == "21:9"
-    assert patches.screen_aspect(1920, 1200) == "16:9"
+    assert patches.screen_aspect(1920, 1200) == "16:10"
+    assert patches.screen_aspect(1920, 1080) == "16:9"
+    assert patches.screen_aspect(1600, 1200) == "4:3"
+    assert patches.screen_aspect(1280, 1024) == "4:3"
     assert patches.screen_hint(None, wide) is None
     assert patches.screen_hint((1920, 1080), LauncherSettings()) is None
     text, state = patches.screen_hint((3840, 1080), LauncherSettings())
     assert state == "warn" and "32:9" in text
     assert patches.screen_hint((3840, 1080), wide)[1] == "ok"
     assert patches.screen_hint((1920, 1080), wide)[1] == "warn"
+
+
+def test_4_3_narrows_the_scene_and_keeps_the_16_9_view():
+    import struct
+    s = LauncherSettings(aspect="4:3", fov=0.9)
+    d = patches.display(s)
+    assert d.size == (1440, 1080) and d.narrow and not d.wide
+    writes = dict(patches.wide_writes(s))
+    assert struct.unpack("<f", writes[0x729978])[0] == struct.unpack("<f", struct.pack("<f", 4 / 3))[0]
+    assert struct.unpack("<f", writes[0x12EFAC4])[0] == 0.5  # the slider is for wide shapes
+    assert struct.unpack("<II", writes[0x754C1B][:4] + writes[0x754C21][:4]) == (1440, 1080)
+    assert struct.unpack("<4I", writes[0x12D0540]) == (960, 1440, 1920, 3072)
+    assert len(writes) == 5
+    assert patches.game_args(s) == ""
+    assert patches.patch_names(s) == ["60 FPS with deltatime"]  # fewer pixels than 1080p
+    assert patches.dmem_mb(s) == 5056
+    assert patches.window(LauncherSettings(aspect="4:3", window_size="1920x1080")) == (1440, 1080)
+
+
+def test_narrow_1440_lines():
+    s = LauncherSettings(aspect="4:3", render_res="1440p")
+    assert patches.display(s).size == (1920, 1440)
+    assert patches.game_args(s) == "-resolutionscale 1.3333"
+    assert patches.patch_names(s)[-1] == "Memory for up to 1440p"
+    code = dict(patches.wide_writes(s))[0x4DC37A]
+    assert 1920 * code[2] >> code[5] == 1440  # 1440 x 1.3333 = 1920 wide
+    s = LauncherSettings(aspect="16:10", render_res="1440p")
+    assert patches.display(s).size == (2304, 1440)
+    widths = struct_widths(s)
+    assert widths[1] == 1728 and round(widths[1] * 4 / 3) == 2304
+
+
+def struct_widths(s):
+    import struct
+    return struct.unpack("<4I", dict(patches.wide_writes(s))[0x12D0540])
+
+
+def test_narrow_screen_hint():
+    text, state = patches.screen_hint((1600, 1200), LauncherSettings())
+    assert state == "ok" and "4:3" in text and "cut off" in text
+    assert patches.screen_hint((1600, 1200), LauncherSettings(aspect="4:3"))[1] == "ok"
+    assert patches.screen_hint((1600, 1200), LauncherSettings(aspect="32:9"))[1] == "warn"
+    assert patches.screen_hint((1920, 1080), LauncherSettings(aspect="4:3"))[1] == "warn"

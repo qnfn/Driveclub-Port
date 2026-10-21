@@ -296,10 +296,16 @@ index 1211eb6..c983d71 100644
          ++wait_cursor;
      }
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-index 53525a9..6b60189 100644
+index 53525a9..8119249 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-@@ -8,6 +8,9 @@
+@@ -4,10 +4,15 @@
+ #include <chrono>
+ #include <array>
+ #include <map>
++#include <mutex>
++#include <set>
+ #include <unordered_map>
  #include <algorithm>
  #include <bit>
  #include <cstdlib>
@@ -309,7 +315,7 @@ index 53525a9..6b60189 100644
  #include <magic_enum/magic_enum.hpp>
  #include "bbport_copy.h"
  #include "bbport_toggles.h"
-@@ -23,6 +26,7 @@
+@@ -23,6 +28,7 @@
  #include "video_core/buffer_cache/region_definitions.h"
  #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
  #include "video_core/renderer_vulkan/vk_instance.h"
@@ -317,7 +323,7 @@ index 53525a9..6b60189 100644
  #include "video_core/renderer_vulkan/vk_runtime.h"
  #include "video_core/renderer_vulkan/vk_scheduler.h"
  #include "video_core/texture_cache/texture_cache.h"
-@@ -151,9 +155,13 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
+@@ -151,9 +157,13 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                                                       MemoryType::DeviceLocal, "Null Index Buffer");
          runtime.FillBuffer(null_index_buffer.get(), 0u, NULL_INDEX_BUFFER_SIZE, 0u);
      }
@@ -332,23 +338,45 @@ index 53525a9..6b60189 100644
  
  void BufferCache::TickFrame() {
      if (std::exchange(fault_process_pending, false)) {
-@@ -210,6 +218,15 @@ void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is
+@@ -210,6 +220,37 @@ void BufferCache::UnmarkRegionAsGpuModified(VAddr device_addr, u64 size, bool is
  
  void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool async,
                               bool assume_locks) {
 +    static const bool trace = std::getenv("BB_READBACK_TRACE") != nullptr;
 +    if (trace) {
-+        static std::atomic<int> logged{0};
-+        if (logged.fetch_add(1) < 200) {
++        // bbport: each distinct range once (menus repeat the same few thousands of times).
++        static std::mutex trace_mutex;
++        static std::map<std::pair<VAddr, u64>, u64> seen;
++        static u64 total = 0;
++        std::scoped_lock lk{trace_mutex};
++        auto [it, added] = seen.try_emplace({device_addr, size}, 0);
++        ++it->second;
++        if (added && seen.size() < 4000) {
 +            std::printf("Readback: %s %#llx +%#llx\n", is_write ? "write" : "read",
 +                        static_cast<unsigned long long>(device_addr),
 +                        static_cast<unsigned long long>(size));
++            std::fflush(stdout);
++        }
++        // Every 2000 readbacks: the ten most frequent ranges so far.
++        if (++total % 2000 == 0) {
++            std::vector<std::pair<u64, VAddr>> top;
++            for (const auto& [range, count] : seen) {
++                top.emplace_back(count, range.first);
++            }
++            std::ranges::sort(top, std::greater{});
++            std::printf("Readback counts after %llu:", static_cast<unsigned long long>(total));
++            for (size_t i = 0; i < std::min<size_t>(10, top.size()); ++i) {
++                std::printf(" %#llx=%llu", static_cast<unsigned long long>(top[i].second),
++                            static_cast<unsigned long long>(top[i].first));
++            }
++            std::printf("\n");
++            std::fflush(stdout);
 +        }
 +    }
      const auto flush_request = [this, device_addr, size, is_write, async] {
          const u32 first_block = device_addr >> block_shift;
          const u32 last_block = (device_addr + size - 1) >> block_shift;
-@@ -232,6 +249,122 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
+@@ -232,6 +273,122 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
      }
  }
  
@@ -471,7 +499,7 @@ index 53525a9..6b60189 100644
  void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool is_write,
                                   bool async) {
      boost::container::small_vector<vk::BufferCopy, 1> copies;
-@@ -429,6 +562,10 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
+@@ -429,6 +586,10 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
      }
      if (is_written) {
          gpu_modified_ranges.Add(device_addr, size);
@@ -482,7 +510,7 @@ index 53525a9..6b60189 100644
      }
      return {arena, arena->Offset(device_addr)};
  }
-@@ -542,6 +679,51 @@ void BufferCache::SynchronizeDmaBuffers() {
+@@ -542,6 +703,51 @@ void BufferCache::SynchronizeDmaBuffers() {
      }
  }
  
@@ -534,7 +562,7 @@ index 53525a9..6b60189 100644
  const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
      const u64 first_page = first_block >> blocks_per_arena_page_shift;
      const u64 last_page = last_block >> blocks_per_arena_page_shift;
-@@ -557,6 +739,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
+@@ -557,6 +763,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
              const auto* new_arena =
                  &arenas.emplace_back(instance, base_block << block_shift,
                                       num_pages << arena_page_bits, MemoryType::Sparse);
@@ -542,7 +570,7 @@ index 53525a9..6b60189 100644
              address_space[first_page] = new_arena;
              address_space[last_page] = new_arena;
          }
-@@ -573,6 +756,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
+@@ -573,6 +780,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
      const u64 total_size = first_size + last_size;
      const u64 end_block = (first_addr + total_size) >> block_shift;
      auto* new_arena = &arenas.emplace_back(instance, first_addr, total_size, MemoryType::Sparse);
