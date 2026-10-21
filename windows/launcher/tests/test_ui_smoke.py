@@ -371,7 +371,7 @@ def test_run_task_reports_on_the_ui_thread(tmp_path):
 
 
 def test_version_and_bundled_resources(monkeypatch, tmp_path):
-    assert dcport.__version__ == "0.4.4"
+    assert dcport.__version__ == "0.4.5"
     assert theme.default_controls() == DEFAULT_INPUT.resolve()
     assert theme.assets_dir() == DEFAULT_INPUT.resolve().parent / "assets"
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
@@ -1092,6 +1092,21 @@ def test_setup_readbacks_switch_off_by_default_and_reaches_the_runtime(tmp_path)
         page.set_readbacks("0")
         assert page.readbacks_choice.value == "0"
         assert game_env(paths, app.settings, fsr=False, base={})["BB_READBACKS"] == "0"
+    finally:
+        app.destroy()
+
+
+def test_setup_scrolls_to_its_last_rows(tmp_path):
+    paths, _ = configured_port(tmp_path, prepared=True)
+    app = App(paths, fsr=True)
+    try:
+        app.show("setup"); page = app.pages["setup"]
+        app.update()
+        top = page.view.winfo_rooty(); bottom = top + page.view.winfo_height()
+        def shown(w):
+            return top <= w.winfo_rooty() and w.winfo_rooty() + w.winfo_height() <= bottom
+        page.view.yview_moveto(1.0); app.update()
+        assert shown(page.readbacks_choice) and shown(page.threading_choice)
     finally:
         app.destroy()
 

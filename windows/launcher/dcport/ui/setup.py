@@ -84,8 +84,17 @@ class SetupPage(tk.Frame):
         self.app = app
         app.paint(self, bg="bg")
         self._build_bottom()
-        self.board = theme.CardBoard(self, app, columns=2)
-        self.board.pack(fill="x")
+        # the cards scroll when the window is too small for them (as on GARAGE)
+        self.view = tk.Canvas(self, highlightthickness=0, bd=0, yscrollincrement=app.px(24))
+        app.paint(self.view, bg="bg")
+        self.view.pack(fill="both", expand=True)
+        self.board = theme.CardBoard(self.view, app, columns=2)
+        self._board_item = self.view.create_window(0, 0, anchor="nw", window=self.board)
+        self.scroll = theme.ThinScrollbar(self, app, self.view.yview, bg_role="bg")
+        self.view.configure(yscrollcommand=self._scrolled)
+        self.view.bind("<Configure>", lambda e: self._fit_board())
+        self.board.bind("<Configure>", lambda e: self._fit_board(), add="+")
+        app.bind("<MouseWheel>", self._wheel, add="+")
         self._build_game(self.board.add(0, 0, title="Game folder"))
         self._build_fps(self.board.add(0, 1, title="Frame rate"))
         self._build_display(self.board.add(1, 0, title="Display"))
@@ -99,6 +108,31 @@ class SetupPage(tk.Frame):
         app.on_theme(lambda pal: self._repaint())
 
     # ------------------------------------------------------------ building
+
+    def _fit_board(self) -> None:
+        w = self.view.winfo_width()
+        if w > 1:
+            self.view.itemconfigure(self._board_item, width=w)
+        self.view.configure(scrollregion=(0, 0, max(1, w), self.board.winfo_reqheight()))
+
+    def _scrolled(self, first, last) -> None:
+        self.scroll.set(first, last)
+        if float(first) <= 0.0 and float(last) >= 1.0:
+            self.scroll.place_forget()
+        else:
+            self.scroll.place(relx=1.0, x=-self.app.px(4), y=self.app.px(4), relheight=1.0,
+                              height=-self.app.px(8), anchor="ne")
+            tk.Misc.lift(self.scroll)  # Canvas.lift raises canvas items instead
+
+    def _wheel(self, event):
+        """The mouse wheel anywhere on this page scrolls it (when it doesn't fit)."""
+        if self.app.current != "setup" or not str(event.widget).startswith(str(self)):
+            return None
+        first, last = self.view.yview()
+        if first <= 0.0 and last >= 1.0:
+            return None
+        self.view.yview_scroll(-3 if event.delta > 0 else 3, "units")
+        return None
 
     def _row(self, master) -> tk.Frame:
         row = tk.Frame(master)

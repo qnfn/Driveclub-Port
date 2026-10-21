@@ -1,4 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """DCport: the DRIVECLUB launcher for Windows."""
 
-__version__ = "0.4.4"
+__version__ = "0.4.5"

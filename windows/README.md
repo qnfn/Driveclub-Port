@@ -7,6 +7,10 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.4.5
+
+- **Fixed: GPU readbacks and Threading could not be reached.** In 0.4.4 the SETUP page was taller than the launcher window at its normal size, so the last rows of the Display card (Threading and GPU readbacks) were cut off at the bottom; they only showed in a maximized or fullscreen window. SETUP now scrolls when the window is too small for it.
+
 ## 0.4.4
 
 - **4:3 and 16:10.** SETUP > Aspect ratio now also has 4:3 and 16:10. The 3D scene renders at the narrower shape with the correct proportions; nothing is stretched. Known issue: the HUD and some menus are cut off at the left and right edges (the game lays them out for 16:9). Requested by @juanme555 (#2).
