@@ -34,7 +34,11 @@ def fake_game(dir: Path, title_id: str = "CUSA00003", app_ver: str = "01.28",
     (dir / "sce_sys").mkdir(parents=True, exist_ok=True)
     (dir / "eboot.bin").write_bytes(b"\x7fELF")
     if base_game:
+        from dcport.game import GAME_MODULES
         (dir / "game.chc").write_bytes(b"chc")
+        (dir / "sce_module").mkdir(exist_ok=True)
+        for name in GAME_MODULES:
+            (dir / name).write_bytes(b"\x7fELF")
     (dir / "sce_sys" / "param.sfo").write_bytes(
         make_sfo({"TITLE_ID": title_id, "APP_VER": app_ver, "TITLE": title}))
     return dir

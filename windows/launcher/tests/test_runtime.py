@@ -59,7 +59,7 @@ def test_env_fixed_values(tmp_path):
         assert e["BB_GPU_USER_DIR"] == str(paths.user)
         assert e["BB_CONFIG"] == str(paths.ini)
         assert e["BB_LENIENT_IMPORTS"] == "1"
-        assert e["BB_READBACKS"] == "0"
+        assert e["BB_READBACKS"] == "2"  # precise readbacks on by default
         assert e["BB_DRAW_PIPE"] == "1"
         assert e["BB_PREP_WORKERS"] == "0"
         assert e["BB_WINDOW_SIZE"] == "1920x1080" and e["BB_DMEM_MB"] == "5056"

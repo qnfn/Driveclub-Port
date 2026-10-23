@@ -7,6 +7,15 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.4.7
+
+- **No more stretched geometry from the second event on.** It came from stale GPU data with GPU readbacks off, like the crash while an event loads (which should be gone too; not confirmed yet). **SETUP > GPU readbacks is now On by default** (precise, offloaded), and On is on the left. It costs FPS; Off gives more FPS but brings those errors back.
+- **GPU layer back to bbport's 1.8.2 code** (bbport's own rollback in 1.9.3), with the Driveclub changes, the fixes restored from GR2fork / shadPS4 (#5433, #5444, #5429, #5463) and new ones: barriers for vertex, index and indirect buffers (#5262), subgroup barriers for shared memory (#5285), GCN NaN rules (#5257), a stable shader translation order (#5364). The shader cache is rebuilt once.
+- **No more crash while sorting cars on cards with lots of video memory** ("Run out of space"): the 1.8.2 texture cache has no 65,535-entry limit.
+- **Depth images of different formats are no longer copied directly** (a copy Vulkan forbids; idea from driveclub-recomp's fix for a crash after a race).
+- **PATCHES > Garage > Unlock Club Cars** (not fully tested yet): the cars that need a club level become available.
+- **Known issue, AMD graphics cards:** a crash with "device lost" can happen during races (an older issue on AMD cards that came back with the 1.8.2 GPU layer). If it happens, send the log (LOG tab).
+
 ## 0.4.6
 
 - **Floating grass fixed.** SETUP > GPU readbacks is now Off / On, and On uses precise, offloaded readbacks (from GR2fork): the game's thread waits for its own copy of the GPU's results while the GPU thread keeps running. The roadside grass is back and stays on the ground. Expect an FPS loss with it On. Reported by @darkresident (#3).
@@ -155,7 +164,7 @@ Requirements: Windows 10/11 64-bit, a CPU with AVX, a Vulkan 1.3 GPU.
 ## Source in this folder
 
 - `launcher/`: the DCport launcher (Python 3.12, Tkinter, Pillow; frozen with PyInstaller via `build.sh fsr|nofsr`) and the first-run prepare tool (`launcher/prepare/`, needs [capstone](https://www.capstone-engine.org/) (BSD) for the red-zone analysis). Tests: `python -m pytest tests`.
-- `runtime/driveclub-runtime.patch`: the Driveclub changes to the native PS4 runtime, against [Supermedo/bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) commit `de2e38a` (version 1.9.2) since DCport 0.4.2 (up to 0.4.0: `fce0878`, 1.8.2). Check out with `git -c core.autocrlf=false` (the patch has LF line endings), apply with `git apply`, then build with `build.sh` in MSYS2 CLANG64 (packages in its `packaging/windows/README.md`, plus `freetype`). The runtime's icon is read from `../launcher/dcport.ico`: put the runtime source next to `launcher/`. Its FSR-Vulkan changes are in the runtime's own `gpu/patches/fsr-vulkan`.
+- `runtime/driveclub-runtime.patch`: the Driveclub changes to the native PS4 runtime, against [Supermedo/bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) commit `beab1ed` (bbport's GPU layer back to 1.8.2, part of 1.9.3) since DCport 0.4.7 (0.4.2 to 0.4.6: `de2e38a`, 1.9.2; up to 0.4.0: `fce0878`, 1.8.2). Check out with `git -c core.autocrlf=false` (the patch has LF line endings), apply with `git apply`, then build with `build.sh` in MSYS2 CLANG64 (packages in its `packaging/windows/README.md`, plus `freetype`). The runtime's icon is read from `../launcher/dcport.ico`: put the runtime source next to `launcher/`. Its FSR-Vulkan changes are in the runtime's own `gpu/patches/fsr-vulkan`.
 - `patches/Driveclub.xml`: community patches (60 FPS with deltatime and others).
 
 ## Windows port credits

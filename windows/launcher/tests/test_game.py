@@ -90,3 +90,16 @@ def test_update_only_folder_is_refused(tmp_path):
     game = ready_checks(update, paths, "GPU", prepared=False)[0]
     assert game.state == "bad" and "Update only" in game.label
     assert ready_checks(full, paths, "GPU", prepared=False)[0].state == "ok"
+
+
+def test_folder_without_a_game_module_is_refused(tmp_path):
+    from dcport.game import incomplete_text, missing_files, ready_checks
+    from dcport.paths import AppPaths
+    from tests.helpers import fake_game
+    game = fake_game(tmp_path / "CUSA00003")
+    assert missing_files(game) == []
+    (game / "logiWheel.prx").unlink()
+    assert missing_files(game) == ["logiWheel.prx"]
+    check = ready_checks(game, AppPaths.for_root(tmp_path / "port"), "GPU", prepared=False)[0]
+    assert check.state == "bad" and "logiWheel.prx" in check.label
+    assert "logiWheel.prx missing" in incomplete_text(missing_files(game))

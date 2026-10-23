@@ -68,6 +68,21 @@ def is_update_only(game_dir: Path) -> bool:
     return has_eboot(game_dir) and not (Path(game_dir) / "game.chc").is_file()
 
 
+# Modules prepare/dc_prepare.py links into the game image (its MODULES list).
+GAME_MODULES = ("sce_module/libc.prx", "sce_module/libSceFios2.prx", "libtbb.prx",
+                "logiWheel.prx", "iksemelGNMm.prx")
+
+
+def missing_files(game_dir: Path) -> "list[str]":
+    """Game modules the folder lacks: an incomplete dump, the game files cannot be prepared."""
+    return [name for name in GAME_MODULES if not (Path(game_dir) / name).is_file()]
+
+
+def incomplete_text(missing: "list[str]") -> str:
+    return (f"Your game folder is incomplete: {', '.join(Path(m).name for m in missing)} "
+            "missing. Dump the full game (base game + 01.28 update) again and choose that folder.")
+
+
 def art_path(game_dir: Path) -> "Path | None":
     # DRIVECLUB's pic0 is the race background; its pic1 is the Evolution Studios logo.
     for name in ("pic0.png", "pic1.png"):
@@ -97,6 +112,8 @@ def ready_checks(game_dir: Path, paths: AppPaths, gpu: "str | None",
         game = Check("Choose the DRIVECLUB folder", "bad")
     elif is_update_only(game_dir):
         game = Check("Update only: put it over the base game", "bad")
+    elif missing := missing_files(game_dir):
+        game = Check(f"Incomplete game: {Path(missing[0]).name} missing", "bad")
     elif info and info.app_ver == "01.28":  # any region; prepare/dc_patches.py checks the same
         game = Check(f"DRIVECLUB {info.title_id} v01.28", "ok")
     else:

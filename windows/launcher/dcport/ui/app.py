@@ -16,8 +16,8 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 from dcport import __version__, patches, profiles, sysinfo, updater
-from dcport.game import (UPDATE_ONLY, Check, art_path, game_info, has_eboot, is_update_only,
-                         ready_checks)
+from dcport.game import (UPDATE_ONLY, Check, art_path, game_info, has_eboot, incomplete_text,
+                         is_update_only, missing_files, ready_checks)
 from dcport.ini import read_ini, update_ini
 from dcport.paths import AppPaths
 from dcport.prepare_state import is_prepared, prepare_command
@@ -674,6 +674,9 @@ class App(tk.Tk):
             gd = self.game_dir()
         if gd is not None and is_update_only(gd):
             race.show_message(UPDATE_ONLY, "bad")
+            return None
+        if gd is not None and (missing := missing_files(gd)):
+            race.show_message(incomplete_text(missing), "bad")
             return None
         race.clear_message()
         return gd

@@ -36,10 +36,15 @@ def main():
         return 2
     game, data, runtime, xml = (Path(a) for a in sys.argv[1:5])
     data.mkdir(parents=True, exist_ok=True)
-    for name in ('eboot.bin', 'sce_sys/param.sfo', 'sce_module/libc.prx', 'sce_module/libSceFios2.prx'):
+    for name in ('eboot.bin', 'sce_sys/param.sfo'):
         if not (game / name).is_file():
             print(f'Missing {name} in {game}: choose the DRIVECLUB folder')
             return 1
+    missing = [m for m in MODULES if not (game / 'sce_module' / m).is_file()]
+    if missing:
+        print(f'Incomplete game dump in {game}: missing {", ".join(Path(m).name for m in missing)}.'
+              ' Dump the full game (base game + 01.28 update) again.')
+        return 1
     prepare.prepare(game, data)
     patched = []
     if xml.is_file():  # no red-zone site may hold an address a community patch writes

@@ -8,7 +8,7 @@ from dcport.ui import theme
 
 HINT = "Applies on the next PLAY. Patches by the PS4 and shadPS4 DRIVECLUB community."
 CARDS = (
-    ("Garage", ("Unlock All Cars and Bikes",)),
+    ("Garage", ("Unlock All Cars and Bikes", "Unlock Club Cars")),
     ("Driving", ("Barrier Disable", "Reset Disable")),
     ("Picture", ("Disable motion blur and depth of field",)),
     ("Photo mode", ("Disable Photomode Free Camera Collision", "Disable Photomode Processing")),

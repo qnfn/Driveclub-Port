@@ -109,10 +109,11 @@ def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
         "BB_USER_NAME": player_name(paths),
         "DC_LANGUAGE": game_language(paths),
     })
-    # dcport.ini readbacks=1 (relaxed) / 2 (precise), SETUP > GPU readbacks On / Precise: the game reads GPU
-    # results exactly when it asks, much slower; the default 0 copies them back once per frame,
-    # which loses the roadside grass (issue #3).
-    readbacks = _ini_value(paths, "readbacks", "0")
+    # dcport.ini readbacks=2 (precise; 1 = 0.4.4's relaxed, runs precise too), SETUP > GPU readbacks
+    # On, the default: the game gets GPU results exactly when it asks. 0 copies them back once per
+    # frame, which loses the roadside grass (issue #3) and stretches geometry from the second event
+    # on (stale GPU data).
+    readbacks = _ini_value(paths, "readbacks", "2")
     if readbacks in ("1", "2"):
         env["BB_READBACKS"] = "2"
     env.pop("DC_GAME_ARGS", None)

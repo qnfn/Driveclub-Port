@@ -31,6 +31,9 @@ TOGGLES = (
     Toggle("Unlock All Cars and Bikes", "All cars and bikes",
            "Every car and bike from the start: the club cars that needed the DRIVECLUB server, "
            "and the Driver Level ones too (the game's own unlockAll option). Patch by illusion."),
+    Toggle("Unlock Club Cars", "Club cars only",
+           "The cars that needed a club level on the DRIVECLUB server. Driver Level cars still "
+           "unlock as you level up. Not needed with All cars and bikes on."),
     Toggle("Barrier Disable", "No track barriers",
            "Drive off the track without the invisible walls."),
     Toggle("Reset Disable", "No reset to track",

@@ -43,16 +43,16 @@ BLUR_NOTE = ("FSR does not run with the PATCHES page's 'No motion blur or "
              "depth of field': the game's anti-aliasing is in that shader.")
 
 
-READBACKS_CHOICES = (("0", "Off"), ("2", "On"))
+READBACKS_CHOICES = (("2", "On"), ("0", "Off"))
 READBACKS_NOTE = ("GPU readbacks: the game gets the GPU's results back exactly when it needs "
-                  "them. It brings back the roadside grass and keeps it on the ground (and maybe "
-                  "other missing graphics). Expect an FPS loss. Off by default. Applies on the "
-                  "next PLAY.")
+                  "them. It keeps the roadside grass on the ground and stops stretched "
+                  "geometry from the second event on. Costs some FPS. On by default. Applies "
+                  "on the next PLAY.")
 
 
 def readbacks_value(ini: dict) -> str:
-    """dcport.ini readbacks: "2" (precise) is On; "1" (relaxed, 0.4.4) counts as On too."""
-    return "2" if ini.get("readbacks", "0").strip() in ("1", "2") else "0"
+    """dcport.ini readbacks: "2" (precise) is On, the default; "1" (0.4.4 relaxed) counts as On."""
+    return "2" if ini.get("readbacks", "2").strip() in ("1", "2") else "0"
 
 
 FRAME_GEN_CHOICES = (("off", "Off"), ("fsr3", "FSR 3.1"))

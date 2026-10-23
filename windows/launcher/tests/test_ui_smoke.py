@@ -371,7 +371,7 @@ def test_run_task_reports_on_the_ui_thread(tmp_path):
 
 
 def test_version_and_bundled_resources(monkeypatch, tmp_path):
-    assert dcport.__version__ == "0.4.6"
+    assert dcport.__version__ == "0.4.7"
     assert theme.default_controls() == DEFAULT_INPUT.resolve()
     assert theme.assets_dir() == DEFAULT_INPUT.resolve().parent / "assets"
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
@@ -1079,17 +1079,17 @@ def test_setup_threading_switch_shows_the_choice(tmp_path):
         app.destroy()
 
 
-def test_setup_readbacks_switch_off_by_default_and_reaches_the_runtime(tmp_path):
+def test_setup_readbacks_switch_on_by_default_and_reaches_the_runtime(tmp_path):
     paths, _ = configured_port(tmp_path, prepared=True)
     app = App(paths, fsr=False)
     try:
         app.show("setup"); page = app.pages["setup"]
-        assert page.readbacks_choice.value == "0" and "FPS" in page.readbacks_note.cget("text")
-        page.set_readbacks("2")  # On = precise
+        assert page.readbacks_choice.value == "2" and "FPS" in page.readbacks_note.cget("text")
+        assert game_env(paths, app.settings, fsr=False, base={})["BB_READBACKS"] == "2"
+        app.update_game_ini({"readbacks": "1"})  # 0.4.4's relaxed On runs precise
+        assert game_env(paths, app.settings, fsr=False, base={})["BB_READBACKS"] == "2"
+        page.set_readbacks("2")
         assert page.readbacks_choice.value == "2" and read_ini(paths.ini)["readbacks"] == "2"
-        assert game_env(paths, app.settings, fsr=False, base={})["BB_READBACKS"] == "2"
-        app.update_game_ini({"readbacks": "1"})  # 0.4.4's relaxed On runs precise now
-        assert game_env(paths, app.settings, fsr=False, base={})["BB_READBACKS"] == "2"
         page.set_readbacks("0")
         assert page.readbacks_choice.value == "0"
         assert game_env(paths, app.settings, fsr=False, base={})["BB_READBACKS"] == "0"
