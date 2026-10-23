@@ -7,6 +7,16 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.5.0
+
+- **No more crash while an event loads** (#6). The game's render-list sort used each entry's category (0–7) as an unchecked index; a bad one counted outside its eight counters and corrupted the renderer's memory (crashes in the sort, or later with broken pointers). A fix in the game code (`Render list category guard`, always on) keeps every category in range in both passes.
+- **Back on the newer GPU layer** (bbport 1.9.2, as in 0.4.6): the AMD "device lost" crash that came back with 0.4.7's older layer is gone. GPU readbacks stay On by default (grass on the ground, no stretched geometry).
+- **Tunnel lighting fixed** (#7): daytime tunnels no longer stay lit like the road outside, and the hard dark box in some tunnels is gone. Driveclub's light culling read depth tiles that never exist on PC; it now gets tiles spanning the whole depth range. Idea and value from driveclub-recomp #145 by HeyOkay, proposed for DCport by @dnfcf524-max. `BB_DC_LIGHT_CULL=0` turns it off.
+- **NVIDIA DLSS** (FSR edition, GeForce RTX; not tested yet, we develop on AMD): SETUP > Anti-aliasing > DLSS, also in the game's menu. DLSS runs as Driveclub's anti-aliasing at 1080p (DLAA) with the same depth and motion as FSR; if it cannot start, FSR 3.1 takes over. Requested by @Marcopal97 (#6).
+- **Shader cache fix** (also in the 0.4.7 pre-release): a new shader variant could overwrite a stored one, so graphics errors appeared until the cache was deleted. Stored variants are now kept.
+- **Logs:** a freeze of 1.5 s or more names the game code each thread waits in; a GPU fault names the object type and name it hit; a crash report lists all registers.
+- The **Anti-aliasing** card and the game menu section are named without "(FSR)".
+
 ## 0.4.7
 
 - **No more stretched geometry from the second event on.** It came from stale GPU data with GPU readbacks off, like the crash while an event loads (which should be gone too; not confirmed yet). **SETUP > GPU readbacks is now On by default** (precise, offloaded), and On is on the left. It costs FPS; Off gives more FPS but brings those errors back.
@@ -85,7 +95,7 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 
 AMD ships FSR 4.1.1 as a DirectX 12 DLL. DCport's **FSR 4.1.1 builder** turns your own copy of that DLL into native **Vulkan** anti-aliasing for Driveclub — no Wine, no Linux, no tools to install:
 
-1. SETUP → Anti-aliasing (FSR) → **Set up FSR 4.1.1…**
+1. SETUP → Anti-aliasing → **Set up FSR 4.1.1…**
 2. Pick your `amd_fidelityfx_upscaler_dx12.dll` (4.1.x).
 3. About two minutes later, choose **FSR 4.1.1** as the mode. Done.
 
@@ -134,7 +144,7 @@ Also new in 0.3.0: **FSR in every race** (0.2.0's FSR ran in menus only), a **PA
 
 Get the latest release from the Releases page:
 
-- `DCport-<version>-windows-fsr.zip`: with FSR 3.1 and FSR 4 (FSR 4 needs a recent AMD or NVIDIA GPU)
+- `DCport-<version>-windows-fsr.zip`: with FSR 3.1, FSR 4 (FSR 4 needs a recent AMD or NVIDIA GPU) and NVIDIA DLSS (GeForce RTX)
 - `DCport-<version>-windows.zip`: without FSR
 
 No game files are included. You need your own dump of DRIVECLUB 01.28, EU (CUSA00003) or US (CUSA00093) (the folder with `eboot.bin` and the `game*.dat` files).
@@ -164,7 +174,7 @@ Requirements: Windows 10/11 64-bit, a CPU with AVX, a Vulkan 1.3 GPU.
 ## Source in this folder
 
 - `launcher/`: the DCport launcher (Python 3.12, Tkinter, Pillow; frozen with PyInstaller via `build.sh fsr|nofsr`) and the first-run prepare tool (`launcher/prepare/`, needs [capstone](https://www.capstone-engine.org/) (BSD) for the red-zone analysis). Tests: `python -m pytest tests`.
-- `runtime/driveclub-runtime.patch`: the Driveclub changes to the native PS4 runtime, against [Supermedo/bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) commit `beab1ed` (bbport's GPU layer back to 1.8.2, part of 1.9.3) since DCport 0.4.7 (0.4.2 to 0.4.6: `de2e38a`, 1.9.2; up to 0.4.0: `fce0878`, 1.8.2). Check out with `git -c core.autocrlf=false` (the patch has LF line endings), apply with `git apply`, then build with `build.sh` in MSYS2 CLANG64 (packages in its `packaging/windows/README.md`, plus `freetype`). The runtime's icon is read from `../launcher/dcport.ico`: put the runtime source next to `launcher/`. Its FSR-Vulkan changes are in the runtime's own `gpu/patches/fsr-vulkan`.
+- `runtime/driveclub-runtime.patch`: the Driveclub changes to the native PS4 runtime, against [Supermedo/bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) commit `de2e38a` (version 1.9.2) since DCport 0.5.0, as in 0.4.2 to 0.4.6 (0.4.7: `beab1ed`, bbport's GPU layer back to 1.8.2; up to 0.4.0: `fce0878`, 1.8.2). Check out with `git -c core.autocrlf=false` (the patch has LF line endings), apply with `git apply`, then build with `build.sh` in MSYS2 CLANG64 (packages in its `packaging/windows/README.md`, plus `freetype`). The runtime's icon is read from `../launcher/dcport.ico`: put the runtime source next to `launcher/`. Its FSR-Vulkan changes are in the runtime's own `gpu/patches/fsr-vulkan`.
 - `patches/Driveclub.xml`: community patches (60 FPS with deltatime and others).
 
 ## Windows port credits
@@ -176,6 +186,8 @@ DCport is built on other people's work: the native PS4 runtime by deadinside28 a
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4):** renderer, shader recompiler and libraries the runtime is built on.
 - **[akitaonrails](https://github.com/akitaonrails/shadPS4):** shadPS4 investigation of Driveclub (MSAA depth resolve).
 - **Also used:** [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) and the AMD FidelityFX SDK (FSR, FSR 3 frame generation), FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX); [dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv) (MIT) and [SPIRV-Tools](https://github.com/KhronosGroup/SPIRV-Tools) (Apache 2.0) for the FSR 4.1.1 set-up; FreeType, SDL3, FFmpeg and the other libraries listed in `licenses/`.
+- **DLSS:** the DLSS bridge from bbport (MIT; IFreemz, bbport contributors), shipped as `dcport_dlss.dll`, and the [NVIDIA DLSS SDK](https://github.com/NVIDIA/DLSS). This program uses NVIDIA DLSS.
+- **Tunnel lighting:** idea and value from [driveclub-recomp](https://github.com/OverkillLabs3/driveclub-recomp) #145 by HeyOkay, proposed for DCport by dnfcf524-max (#7).
 - **Community patches** ([shadps4-emu/ps4_cheats](https://github.com/shadps4-emu/ps4_cheats)): illusion, u/Charlie_Muggins, kalaposfos; "Unlock All Cars and Bikes" by illusion.
 - **Ultrawide:** after rafidwayne's [Driveclub_Widescreen](https://github.com/rafidwayne/Driveclub_Widescreen) (camera aspect, display width, field of view) and its wide-scene extension in the [Driveclub PC wrapper](https://github.com/ondrejeder/Driveclub-pc-wrapper), both GPL-2.0-or-later; FOV fix value by Kravickas.
 - Windows port by **qnfn** (system functions, fonts, readbacks, upscaler integration, launcher).
@@ -187,6 +199,7 @@ DCport is built on other people's work: the native PS4 runtime by deadinside28 a
 - **Educational and Preservation Purpose:** This repository is an independent reverse-engineering project conducted strictly for interoperability, software preservation, and educational purposes. It is not affiliated with, endorsed by, or sponsored by Sony Interactive Entertainment, Evolution Studios, or any associated entities.
 - **Free:** DCport is free and always will be. If someone sold it to you, ask for your money back.
 - **FSR (Windows):** AMD, FidelityFX and FSR are trademarks of Advanced Micro Devices, Inc.; DCport is not affiliated with AMD. The FSR edition's download includes FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX) under AMD's MIT license (`fsr4_shaders/LICENSE-FSR4-v07.txt`). They are not part of this repository. FSR 4.1.1 is never distributed: it is built on the player's PC from their own DLL.
+- **DLSS (Windows):** NVIDIA, GeForce RTX and DLSS are trademarks of NVIDIA Corporation; DCport is not affiliated with NVIDIA. The FSR edition's download includes NVIDIA's DLSS runtime (`bin/nvngx_dlss.dll`) under the NVIDIA RTX SDKs license (`licenses/NVIDIA-DLSS-LICENSE.txt`). It is not part of this repository.
 - **No Warranty:** DCport is provided "as is", without warranty of any kind (see the GPL). Use it at your own risk and keep a backup of your saves.
 - Rights holders with a concern can open an issue on this repository; we will respond promptly.
 

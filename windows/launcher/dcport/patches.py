@@ -45,6 +45,11 @@ TOGGLES = (
 )
 DEFAULT_TOGGLES = ()
 
+# Fixes that run in every session, not offered on the PATCHES page.
+ALWAYS = (
+    "Render list category guard",  # a bad render-list category corrupted the renderer heap
+)
+
 # The frame-rate patch above 30 FPS; "fixed" is the engine's own 60 Hz tick, which keeps the
 # few features that the deltatime version breaks.
 TIMING = {
@@ -260,7 +265,7 @@ def _memory_patch(w: int, h: int) -> "tuple[str, int] | None":
 
 def patch_names(s: LauncherSettings) -> list[str]:
     """The patches of a session, in Driveclub.xml's own names."""
-    names: list[str] = []
+    names: list[str] = list(ALWAYS)
     if s.fps != 30:  # 30 FPS is the game's original timing
         names.append(TIMING.get(s.patch_timing, TIMING[DEFAULT_TIMING]))
     known = {t.name for t in TOGGLES}
@@ -289,6 +294,15 @@ def dmem_mb(s: LauncherSettings) -> int:
     return DEFAULT_DMEM_MB + resolution(s.render_res).extra_dmem_mb
 
 
+def xml_names(xml: Path) -> set[str]:
+    import xml.etree.ElementTree as ET
+
+    try:
+        return {m.get("Name") for m in ET.parse(xml).getroot().iter("Metadata")}
+    except (OSError, ET.ParseError):
+        return set()
+
+
 def build(game_dir: Path, xml: Path, out: Path, names: list[str],
           extra: "list[tuple[int, bytes]]" = ()) -> None:
     """Compile data/patches.bin (the named patches, then the extra writes); rewritten only
@@ -296,6 +310,9 @@ def build(game_dir: Path, xml: Path, out: Path, names: list[str],
     import dcport.prepare_state  # noqa: F401  (puts the prepare tool on sys.path in dev)
     import dc_patches  # from the bundled prepare tool (launcher-app/prepare)
 
+    # An older Driveclub.xml (a user's own copy) lacks the newer fixes: run without them.
+    if missing := [n for n in ALWAYS if n in names and n not in xml_names(xml)]:
+        names = [n for n in names if n not in missing]
     tmp = out.with_suffix(".new")
     try:
         dc_patches.compile_patches(game_dir, xml, tmp, names, extra)

@@ -538,4 +538,17 @@
             <Line Type="bytes" Address="0x006053c2" Value="31c00f1f00"/>
         </PatchList>
     </Metadata>
+    <Metadata Title="Driveclub"
+              Name="Render list category guard"
+              Note="Always on (DCport fix). The render-list sort at 0x00b10b90 uses each entry's category (0..7) as an unchecked index; a bad one counted outside its eight counters and corrupted the renderer heap (crashes while an event loads). The category is now masked to 0..7 in both passes."
+              Author="DCport"
+              PatchVer="1.0"
+              AppVer="01.28"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x00b10d0e" Value="c5fa10410cc5f850d0c1e21f81ca0000003fc5f96ecac5fa58c1c5fa2cd083e207ff4493684883c120ffc875d3"/>
+            <Line Type="bytes" Address="0x00b10e1b" Value="c5fa2cf183e607"/>
+            <Line Type="bytes" Address="0x00b10e79" Value="c5fa2cc183e007"/>
+        </PatchList>
+    </Metadata>
 </Patch>

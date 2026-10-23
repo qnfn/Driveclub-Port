@@ -16,29 +16,30 @@ def xml_names() -> set[str]:
 def test_every_name_is_in_the_xml():
     names = xml_names()
     wanted = [t.name for t in patches.TOGGLES] + list(patches.TIMING.values())
+    wanted += list(patches.ALWAYS)
     wanted += [p for r in patches.RESOLUTIONS for p in r.patches]
     assert [w for w in wanted if w not in names] == []
 
 
 def test_default_session_is_the_60_fps_patch():
-    assert patches.patch_names(LauncherSettings()) == ["60 FPS with deltatime"]
+    assert patches.patch_names(LauncherSettings()) == [*patches.ALWAYS, "60 FPS with deltatime"]
     assert patches.dmem_mb(LauncherSettings()) == patches.DEFAULT_DMEM_MB
 
 
 def test_30_fps_has_no_frame_rate_patch_but_keeps_toggles():
     s = LauncherSettings(fps=30, patches=["Barrier Disable"])
-    assert patches.patch_names(s) == ["Barrier Disable"]
+    assert patches.patch_names(s) == [*patches.ALWAYS, "Barrier Disable"]
 
 
 def test_unknown_names_and_keys_are_ignored():
     s = LauncherSettings(patches=["Barrier Disable", "Run without sysmodules", "bogus"],
                          patch_timing="weird", render_res="16k")
-    assert patches.patch_names(s) == ["60 FPS with deltatime", "Barrier Disable"]
+    assert patches.patch_names(s) == [*patches.ALWAYS, "60 FPS with deltatime", "Barrier Disable"]
 
 
 def test_render_above_1080p_uses_the_engine_scale_not_the_internal_patch():
     s = LauncherSettings(patch_timing="fixed", render_res="1440p")
-    assert patches.patch_names(s) == ["60 FPS with fixed tickrate",
+    assert patches.patch_names(s) == [*patches.ALWAYS, "60 FPS with fixed tickrate",
                                       "1440p [2560x1440] Output resolution",
                                       "Memory for up to 1440p"]
     assert patches.dmem_mb(s) == 5056 + 3000
@@ -68,7 +69,7 @@ def test_32_9_at_1080p_matches_the_community_patches():
     assert writes[0x16EFAC4 - 0x400000].hex() == "0000283f"
     assert patches.display(s).size == (3840, 1080)
     assert patches.game_args(s) == ""
-    assert patches.patch_names(s) == ["60 FPS with deltatime", "Memory for up to 4K"]
+    assert patches.patch_names(s) == [*patches.ALWAYS, "60 FPS with deltatime", "Memory for up to 4K"]
     assert patches.dmem_mb(s) == 5056 + 5000
     assert len(writes) == 5  # no -resolutionscale stub at 1080 lines
 
@@ -131,7 +132,7 @@ def test_4_3_narrows_the_scene_and_keeps_the_16_9_view():
     assert struct.unpack("<4I", writes[0x12D0540]) == (960, 1440, 1920, 3072)
     assert len(writes) == 5
     assert patches.game_args(s) == ""
-    assert patches.patch_names(s) == ["60 FPS with deltatime"]  # fewer pixels than 1080p
+    assert patches.patch_names(s) == [*patches.ALWAYS, "60 FPS with deltatime"]  # fewer pixels than 1080p
     assert patches.dmem_mb(s) == 5056
     assert patches.window(LauncherSettings(aspect="4:3", window_size="1920x1080")) == (1440, 1080)
 

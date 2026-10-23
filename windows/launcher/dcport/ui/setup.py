@@ -15,7 +15,13 @@ from dcport.ui import theme
 FPS_ERROR = "Enter a whole number from 30 to 240"
 FSR4_MISSING = "FSR 4 needs the fsr4_shaders folder next to DriveClub.exe"
 HINT = "Changes save at once. Game not starting after an update? Prepare its files again."
-UPSCALERS = (("off", "Off"), ("fsr3", "FSR 3.1"), ("fsr4", "FSR 4"), ("fsr411", "FSR 4.1.1"))
+UPSCALERS = (("off", "Off"), ("fsr3", "FSR 3.1"), ("fsr4", "FSR 4"), ("fsr411", "FSR 4.1.1"),
+             ("dlss", "DLSS"))
+# NVIDIA DLSS: the bridge and NVIDIA's runtime next to the game (bin/), GeForce RTX only.
+DLSS_FILES = ("dcport_dlss.dll", "nvngx_dlss.dll")
+DLSS_NOTE = ("NVIDIA DLSS: DRIVECLUB's anti-aliasing at 1080p (DLAA) on GeForce RTX cards. "
+             "If DLSS cannot start, the game uses FSR 3.1.")
+DLSS_MISSING = "DLSS needs an NVIDIA GeForce RTX card and its files in the bin folder"
 FSR411_HINT = ("FSR 4.1.1 is built once from your own amd_fidelityfx_upscaler_dx12.dll "
                "(Set up…). DCport does not include it.")
 GLYPHS = {"ok": "✓", "warn": "⚠", "bad": "✕"}
@@ -36,10 +42,10 @@ THREADING_CHOICES = (("auto", "Auto"), ("1", "On"), ("0", "Off"))
 THREADING_NOTE = ("Threading: the game's GPU work is prepared on extra threads. It gives more FPS "
                   "but can crash mid-race, so Auto keeps it off (as Off does); On turns it on. "
                   "Applies on the next PLAY.")
-AA_NOTE = ("FSR is DRIVECLUB's anti-aliasing at 1080p (native AA), not an upscaler: the game's "
-           "effects and HUD after it stay at 1080p, so there are no Quality, Balanced or "
-           "Performance modes.")
-BLUR_NOTE = ("FSR does not run with the PATCHES page's 'No motion blur or "
+AA_NOTE = ("FSR and DLSS are DRIVECLUB's anti-aliasing at 1080p (native AA), not upscalers: "
+           "the game's effects and HUD after it stay at 1080p, so there are no Quality, "
+           "Balanced or Performance modes.")
+BLUR_NOTE = ("FSR and DLSS do not run with the PATCHES page's 'No motion blur or "
              "depth of field': the game's anti-aliasing is in that shader.")
 
 
@@ -114,7 +120,7 @@ class SetupPage(tk.Frame):
         self._build_display(self.board.add(1, 0, title="Display"))
         self.upscaler_choice = None
         if app.fsr:
-            self._build_upscaling(self.board.add(1, 1, title="Anti-aliasing (FSR)"))
+            self._build_upscaling(self.board.add(1, 1, title="Anti-aliasing"))
         self._error = ""
         self._phase = app.phase
         self._checks: list[tuple[tk.Label, str]] = []
@@ -621,12 +627,23 @@ class SetupPage(tk.Frame):
         except OSError:
             return False
 
+    def dlss_available(self) -> bool:
+        """The DLSS files are installed and the GPU is NVIDIA (or not known yet)."""
+        try:
+            files = all((self.app.paths.bin / name).is_file() for name in DLSS_FILES)
+        except OSError:
+            return False
+        gpu = self.app.gpu
+        return files and (gpu is None or "nvidia" in gpu.lower())
+
     def _refresh_upscaling(self) -> None:
         ini = self.app.game_ini()
         current = ini.get("upscaler", "fsr3").strip()  # the runtime's default is FSR 3
         self.upscaler_choice.set(current)
         fsr4 = self.fsr4_available()
         self.upscaler_choice.set_enabled("fsr4", fsr4)
+        dlss = self.dlss_available()
+        self.upscaler_choice.set_enabled("dlss", dlss)
         ready411 = fsr411.available(self.app.paths)
         self.upscaler_choice.set_enabled("fsr411", ready411)
         if not self._fsr411_busy:
@@ -636,7 +653,9 @@ class SetupPage(tk.Frame):
                 text="FSR 4.1.1 is set up." if ready411 else FSR411_HINT,
                 fg=self.app.palette["muted"])
         known = {value for value, _ in UPSCALERS}
-        if not fsr4:
+        if current == "dlss":
+            note, role = (DLSS_NOTE, "muted") if dlss else (DLSS_MISSING, "warn")
+        elif not fsr4:
             note, role = FSR4_MISSING, "warn" if current == "fsr4" else "muted"
         elif current not in known:
             note, role = f"Chosen in the game's menu: {current}", "muted"
