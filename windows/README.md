@@ -7,6 +7,11 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.5.2
+
+- **Tunnel lighting above 1080p, now also with Threading on** (#2, #7): the 0.5.1 fix sized the game's light lists for the render size, but with threaded recording the count that tells the game how many to fill was never raised, so the hard edge across tunnels stayed (at 1440p, 4K and 4:3 1920x1440). It is now raised on both paths.
+- **4:3 and 16:10: no extra speedometer ring** (#2): the speedometer's outer ring is drawn by its own shader, which the 0.5.1 HUD fit missed, so an unfitted copy showed in the lower-right corner. It now fits with the rest of the HUD. Reported by @juanme555.
+
 ## 0.5.1
 
 - **Tunnel lighting above 1080p** (#7): at Render 1440p or 4K the lower part of the screen had no tunnel lighting, with a hard edge across the picture. The game makes its per-tile light lists for 1080p only; they are now sized for the real render size. Idea from driveclub-recomp #145 by HeyOkay; reported by @darkresident.

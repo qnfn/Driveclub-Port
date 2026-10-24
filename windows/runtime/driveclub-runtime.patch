@@ -4094,10 +4094,10 @@ index e5e14b1..79439cd 100644
          cmdbuf.endDebugUtilsLabelEXT();
      }
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-index 2bf5a5d..41a2dea 100644
+index 2bf5a5d..543d283 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-@@ -1,3734 +1,4369 @@
+@@ -1,3734 +1,4526 @@
 -// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 -// SPDX-License-Identifier: GPL-2.0-or-later
 -
@@ -8532,13 +8532,19 @@ index 2bf5a5d..41a2dea 100644
 +        const char* env = std::getenv("BB_DC_UI_FIT");
 +        return !(env && env[0] == '0');
 +    }();
-+    if (!on || !regs.color_buffers[0] ||
-+        !FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
++    if (!on || !regs.color_buffers[0]) {
 +        return 1.0f;
 +    }
 +    const u32 w = regs.screen_scissor.bottom_right_x - regs.screen_scissor.top_left_x;
 +    const u32 h = regs.screen_scissor.bottom_right_y - regs.screen_scissor.top_left_y;
 +    if (w == 0 || h == 0 || w * 9 >= h * 16) {
++        return 1.0f;
++    }
++    // Some HUD parts (the speedometer's outer ring) are drawn first into full- and half-size
++    // layers that a full-screen pass then puts on the screen. Those layers have the screen's
++    // shape; other targets (textures of any shape) are left alone.
++    if (!FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address()) && w * 3 != h * 4 &&
++        w * 10 != h * 16) {
 +        return 1.0f;
 +    }
 +    return float(w) * 9.0f / (float(h) * 16.0f);
@@ -8557,6 +8563,77 @@ index 2bf5a5d..41a2dea 100644
 +    }
 +}
 +
++// Race HUD parts (the speedometer's rings among them) are drawn into the display buffer by
++// other shaders with the same UI matrix in one of their buffers. A buffer is fitted when it
++// starts with the matrix the quad shader used last.
++constexpr std::array<u64, 2> DcUiExtraShaders = {0xb0295518, 0x03528cba};
++// A HUD mesh shader with its own matrices; fitted through the viewport (see
++// UpdateViewportScissorState).
++constexpr u64 DcUiMeshShader = 0xdc8e480a;
++static std::mutex dc_ui_matrix_mutex;
++static std::array<float, 16> dc_ui_matrix{};
++
++// The buffer holding the UI matrix: 5 for the quad shader, 0 for the others.
++static u32 DcUiMatrixIndex(u64 hash) {
++    return hash == DcUiShader ? DcUiMatrixBuffer : 0;
++}
++
++static bool DcUiShaderFits(u64 hash) {
++    return hash == DcUiShader ||
++           std::find(DcUiExtraShaders.begin(), DcUiExtraShaders.end(), hash) !=
++               DcUiExtraShaders.end();
++}
++
++// Fits buffer `index` of a draw by shader `hash` in place, if it holds the UI matrix.
++static void DcUiFitBuffer(u64 hash, u32 index, void* data, u64 size, float fit) {
++    if (fit == 1.0f || size < DcUiMatrixSize) {
++        return;
++    }
++    auto* m = static_cast<float*>(data);
++    if (hash == DcUiShader) {
++        if (index != DcUiMatrixBuffer) {
++            return;
++        }
++        {
++            std::scoped_lock lock{dc_ui_matrix_mutex};
++            std::memcpy(dc_ui_matrix.data(), m, DcUiMatrixSize);
++        }
++        DcUiFitMatrix(data, fit);
++        return;
++    }
++    bool match = true;
++    {
++        std::scoped_lock lock{dc_ui_matrix_mutex};
++        for (const u32 i : {0u, 1u, 4u, 5u, 12u, 13u, 15u}) {
++            match &= m[i] == dc_ui_matrix[i];
++        }
++        match &= dc_ui_matrix[15] != 0.0f;
++    }
++    static std::mutex seen_mutex;
++    static std::unordered_set<u64> seen;
++    {
++        std::scoped_lock lock{seen_mutex};
++        if (seen.size() < 32 && seen.insert(hash ^ (u64(index) << 40) ^ (u64(match) << 48)).second) {
++            std::printf("UI fit: shader %08llx buffer %u (%llu bytes) %s: %g %g %g %g / %g %g %g "
++                        "%g / %g %g %g %g / %g %g %g %g\n",
++                        (unsigned long long)hash, index, (unsigned long long)size,
++                        match ? "fitted" : "no UI matrix", m[0], m[1], m[2], m[3], m[4], m[5],
++                        m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
++        }
++    }
++    if (match) {
++        for (const u32 i : {0u, 1u, 4u, 5u, 12u, 13u}) {
++            m[i] *= fit;
++        }
++    }
++}
++
++// DCport: Driveclub's light culling shader and its record count (defined with BindBuffers).
++constexpr u64 DcLightCullShader = 0xbfce517c;
++static void DcRaiseLightRecords(const Shader::Info& stage, const PreparedStage* prepared,
++                                Core::MemoryManager* memory, u32* ud, size_t ud_size,
++                                const char* path);
++
 +void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
 +                           boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out) {
 +    const PreparedStage* prepared_stage = nullptr;
@@ -8572,7 +8649,7 @@ index 2bf5a5d..41a2dea 100644
 +    }
 +    const u64 alignment = std::max<u64>(instance.StorageMinAlignment(),
 +                                        instance.UniformMinAlignment());
-+    const float ui_fit = stage.pgm_hash == DcUiShader ? DcUiFit(Regs()) : 1.0f;
++    const float ui_fit = DcUiShaderFits(stage.pgm_hash) ? DcUiFit(Regs()) : 1.0f;
 +    const auto copy = [&](u32 index, const void* source, VAddr address, u64 size) {
 +        const auto offset = constant_ring->Allocate(size, alignment);
 +        if (!offset) {
@@ -8584,8 +8661,8 @@ index 2bf5a5d..41a2dea 100644
 +        } else {
 +            memory->CopySparseMemory(address, dst, size);
 +        }
-+        if (ui_fit != 1.0f && index == DcUiMatrixBuffer && size >= DcUiMatrixSize) {
-+            DcUiFitMatrix(dst, ui_fit);
++        if (ui_fit != 1.0f && !source && index == DcUiMatrixIndex(stage.pgm_hash)) {
++            DcUiFitBuffer(stage.pgm_hash, index, dst, size, ui_fit);
 +        }
 +        constant_ring->Flush(*offset, size);
 +        out.push_back({index, static_cast<u32>(size), *offset, address});
@@ -8595,8 +8672,15 @@ index 2bf5a5d..41a2dea 100644
 +        if (desc.IsSpecial()) {
 +            if (desc.buffer_type == Shader::BufferType::Flatbuf &&
 +                !stage.flattened_ud_buf.empty()) {
-+                copy(index, stage.flattened_ud_buf.data(), 0,
-+                     stage.flattened_ud_buf.size() * sizeof(u32));
++                const u32* ud = stage.flattened_ud_buf.data();
++                std::vector<u32> dc_ud;
++                if (stage.pgm_hash == DcLightCullShader) {
++                    dc_ud.assign(stage.flattened_ud_buf.begin(), stage.flattened_ud_buf.end());
++                    DcRaiseLightRecords(stage, prepared_stage, memory, dc_ud.data(), dc_ud.size(),
++                                        "ring");
++                    ud = dc_ud.data();
++                }
++                copy(index, ud, 0, stage.flattened_ud_buf.size() * sizeof(u32));
 +            }
 +            continue;
 +        }
@@ -9067,8 +9151,14 @@ index 2bf5a5d..41a2dea 100644
 +        static std::mutex scan_mutex;
 +        static std::unordered_set<u64> seen;
 +        std::scoped_lock lock{scan_mutex};
-+        if ((display || ss.bottom_right_x == ss.bottom_right_y * 4 / 3) && seen.size() < 200 &&
-+            seen.insert(key).second) {
++        // The HUD shaders and the full-screen pass are listed wherever they draw: a HUD part
++        // drawn into another target first escapes the fit.
++        const auto* fs = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
++        const u64 ps = fs ? fs->pgm_hash : 0;
++        if ((display || DcUiShaderFits(vs) || vs == 0x8d52ab95) && seen.size() < 200 &&
++            seen.insert(key ^ (ps << 3)).second) {
++            std::printf("UI scan: ps %08llx height %u, ", (unsigned long long)ps,
++                        regs.color_buffers[0].Height());
 +            std::printf("UI scan: %s %#llx pitch %u vs %08llx viewport x %.1f+-%.1f y "
 +                        "%.1f+-%.1f, screen scissor %u,%u-%u,%u, generic %u,%u-%u,%u, clip %s, "
 +                        "vte x %u y %u\n",
@@ -10359,7 +10449,6 @@ index 2bf5a5d..41a2dea 100644
 +
 +// DCport: DriveClub's local-light culling shader and a depth tile covering [0, 1] (see
 +// BindBuffers).
-+constexpr u64 DcLightCullShader = 0xbfce517c;
 +constexpr u32 DcFullDepthTile = 0x0003f00f;
 +// The ambient pass that reads the culling shader's light lists, and one list: a count and up
 +// to 24 volume ids per 16x16 pixel tile.
@@ -10396,13 +10485,43 @@ index 2bf5a5d..41a2dea 100644
 +    return ((width + 15) / 16) * ((height + 15) / 16);
 +}
 +
++// The culling shader's record count (user data 10) for the real render size: raised to the
++// tile count when the game sized its lists (buffer 5) smaller, else left as it is. Applied to
++// the flat user data on both paths: copied into the constant ring with threaded recording,
++// bound from the stream buffer without.
++static void DcRaiseLightRecords(const Shader::Info& stage, const PreparedStage* prepared,
++                                Core::MemoryManager* memory, u32* ud, size_t ud_size,
++                                const char* path) {
++    if (stage.pgm_hash != DcLightCullShader || !DcLightCullFix() || ud_size <= DcLightListCountUd ||
++        stage.buffers.size() <= 5 || stage.buffers[5].IsSpecial()) {
++        return;
++    }
++    const auto lists = prepared ? prepared->buffer_sharps[5] : stage.buffers[5].GetSharp(stage);
++    const u32 game_records = u32(lists.GetSize() / DcLightListStride);
++    const u32 tiles = DcLightTiles(stage, prepared, memory);
++    if (game_records == 0 || tiles <= game_records) {
++        return;
++    }
++    if (ud[DcLightListCountUd] != game_records) {
++        static std::atomic<bool> noted{false};
++        if (!noted.exchange(true)) {
++            std::printf("Light lists: record count not found in user data (%u, lists %u); the "
++                        "lists stay at %u tiles\n",
++                        ud[DcLightListCountUd], game_records, game_records);
++        }
++        return;
++    }
++    ud[DcLightListCountUd] = tiles;
++    static std::atomic<bool> noted{false};
++    if (!noted.exchange(true)) {
++        std::printf("Light lists: record count %u -> %u (%s)\n", game_records, tiles, path);
++    }
++}
++
 +void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* prepared,
 +                             Shader::Backend::Bindings& binding,
 +                             Shader::PushData& push_data, u32& write_index) {
 +    const u64 alignment = instance.StorageMinAlignment();
-+    // DCport: light list record count to raise in the culling shader's user data (from, to).
-+    u32 dc_list_records_from = 0;
-+    u32 dc_list_records_to = 0;
 +    for (u32 buffer_index = 0; buffer_index < stage.buffers.size(); ++buffer_index) {
 +        const auto& desc = stage.buffers[buffer_index];
 +        const auto src_access =
@@ -10435,18 +10554,11 @@ index 2bf5a5d..41a2dea 100644
 +                }
 +                const u32* ud = stage.FlatUserData().data();
 +                std::vector<u32> dc_ud;
-+                if (dc_list_records_to != 0 && stage.FlatUserData().size() > DcLightListCountUd &&
-+                    ud[DcLightListCountUd] == dc_list_records_from) {
++                if (stage.pgm_hash == DcLightCullShader) {
 +                    dc_ud.assign(stage.FlatUserData().begin(), stage.FlatUserData().end());
-+                    dc_ud[DcLightListCountUd] = dc_list_records_to;
++                    DcRaiseLightRecords(stage, prepared, memory, dc_ud.data(), dc_ud.size(),
++                                        "stream");
 +                    ud = dc_ud.data();
-+                } else if (dc_list_records_to != 0) {
-+                    static std::atomic<bool> noted{false};
-+                    if (!noted.exchange(true)) {
-+                        std::printf("Light lists: record count not found in user data; the "
-+                                    "lists stay at %u tiles\n",
-+                                    dc_list_records_from);
-+                    }
 +                }
 +                const u64 offset = vk_buffer.Copy(ud, ubo_size, alignment);
 +                buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
@@ -10511,20 +10623,33 @@ index 2bf5a5d..41a2dea 100644
 +                                     reinterpret_cast<const void*>(vsharp.base_address),
 +                                     memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()));
 +            }
-+            const float ui_fit = stage.pgm_hash == DcUiShader &&
-+                                         buffer_index == DcUiMatrixBuffer && !desc.is_written
++            const float ui_fit = DcUiShaderFits(stage.pgm_hash) && !desc.is_written &&
++                                         !desc.is_formatted &&
++                                         buffer_index == DcUiMatrixIndex(stage.pgm_hash)
 +                                     ? DcUiFit(Regs())
 +                                     : 1.0f;
 +            if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
 +                buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
 +            } else if (ui_fit != 1.0f && vsharp.GetSize() >= DcUiMatrixSize &&
-+                       vsharp.GetSize() <= 4096 &&
-+                       memory->IsValidGpuMapping(vsharp.base_address, vsharp.GetSize())) {
-+                // DCport: the UI matrix fitted to a narrow screen (DcUiFit), from a copy.
++                       memory->IsValidGpuMapping(vsharp.base_address, DcUiMatrixSize)) {
++                // DCport: the UI matrix fitted to a narrow screen (DcUiFit), from a copy. The
++                // HUD shaders read only the start of this buffer (at most 31 dwords), so a large
++                // one (too big for the constant ring) is cut to its first 4 KiB.
 +                std::array<u8, 4096> constants;
-+                const u32 constants_size = u32(vsharp.GetSize());
++                const u32 constants_size = u32(std::min<u64>(
++                    memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()),
++                    constants.size()));
++                if (vsharp.GetSize() > constants.size()) {
++                    static std::atomic<bool> noted{false};
++                    if (!noted.exchange(true)) {
++                        std::printf("UI fit: shader %08llx matrix in a %llu-byte buffer\n",
++                                    (unsigned long long)stage.pgm_hash,
++                                    (unsigned long long)vsharp.GetSize());
++                    }
++                }
 +                memory->CopySparseMemory(vsharp.base_address, constants.data(), constants_size);
-+                DcUiFitMatrix(constants.data(), ui_fit);
++                DcUiFitBuffer(stage.pgm_hash, buffer_index, constants.data(), constants_size,
++                              ui_fit);
 +                auto& vk_buffer = buffer_cache.GetStreamBuffer();
 +                const u64 offset = vk_buffer.Copy(constants.data(), constants_size, alignment);
 +                push_data.AddOffset(binding.buffer, 0);
@@ -10551,12 +10676,14 @@ index 2bf5a5d..41a2dea 100644
 +                // host buffer sized for the real render size instead (the guest memory after the
 +                // lists belongs to something else) and the record count is raised to match.
 +                bool dc_host_list = false;
++                u32 dc_tiles = 0;
 +                const bool dc_list_writer =
 +                    stage.pgm_hash == DcLightCullShader && buffer_index == 5 && desc.is_written;
 +                const bool dc_list_reader =
 +                    stage.pgm_hash == DcAmbientShader && buffer_index == 1 && !desc.is_written;
 +                if ((dc_list_writer || dc_list_reader) && DcLightCullFix()) {
 +                    const u32 tiles = DcLightTiles(stage, prepared, memory);
++                    dc_tiles = tiles;
 +                    const u64 needed = u64(tiles) * DcLightListStride;
 +                    if (needed > size) {
 +                        std::scoped_lock lock{dc_light_lists_mutex};
@@ -10572,15 +10699,38 @@ index 2bf5a5d..41a2dea 100644
 +                                        tiles, (unsigned long long)vsharp.base_address,
 +                                        (unsigned long long)(size / DcLightListStride));
 +                        }
++                        dc_light_guest[vsharp.base_address] = size;
 +                        if (list && list->SizeBytes() >= needed) {
-+                            if (dc_list_writer) {
-+                                dc_list_records_from = u32(size / DcLightListStride);
-+                                dc_list_records_to = tiles;
-+                            }
 +                            buffer = list.get();
 +                            offset = 0;
 +                            size = needed;
 +                            dc_host_list = true;
++                        }
++                    }
++                }
++                // DCport: BB_DC_LIGHT_SCAN=1 names each shader binding that touches the game's
++                // light lists, redirected or not (each combination once).
++                static const bool light_scan = std::getenv("BB_DC_LIGHT_SCAN") != nullptr;
++                if (light_scan) {
++                    std::scoped_lock lock{dc_light_lists_mutex};
++                    for (const auto& [guest, guest_size] : dc_light_guest) {
++                        if (vsharp.base_address < guest + guest_size &&
++                            guest < vsharp.base_address + vsharp.GetSize()) {
++                            static std::unordered_set<u64> seen;
++                            const u64 key = stage.pgm_hash ^ (u64(buffer_index) << 40) ^
++                                            (u64(desc.is_written) << 48) ^
++                                            (u64(dc_host_list) << 49) ^ (u64(dc_tiles) << 8);
++                            if (seen.size() < 64 && seen.insert(key).second) {
++                                std::printf("Light scan: shader %08llx buffer %u %s at %#llx size "
++                                            "%llu (lists %#llx), %u tiles, %s\n",
++                                            (unsigned long long)stage.pgm_hash, buffer_index,
++                                            desc.is_written ? "writes" : "reads",
++                                            (unsigned long long)vsharp.base_address,
++                                            (unsigned long long)vsharp.GetSize(),
++                                            (unsigned long long)guest, dc_tiles,
++                                            dc_host_list ? "host lists" : "GUEST memory");
++                            }
++                            break;
 +                        }
 +                    }
 +                }
@@ -11708,7 +11858,7 @@ index 2bf5a5d..41a2dea 100644
 +}
 +
 +void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
-+    UpdateViewportScissorState();
++    UpdateViewportScissorState(pipeline);
 +    UpdateDepthStencilState();
 +    UpdatePrimitiveState(is_indexed);
 +    UpdateRasterizationState();
@@ -11721,8 +11871,15 @@ index 2bf5a5d..41a2dea 100644
 +                             [&](auto&& command) { scheduler.Record(std::move(command)); });
 +}
 +
-+void Rasterizer::UpdateViewportScissorState() const {
++void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) const {
 +    const auto& regs = Regs();
++    // DCport: HUD meshes (the speedometer's outer ring) carry their own matrices, so on a narrow
++    // screen their viewport is scaled around the screen's centre instead: the same as DcUiFit
++    // scaling the quad shader's matrix.
++    const float ui_fit = pipeline && pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash ==
++                                         DcUiMeshShader
++                             ? DcUiFit(regs)
++                             : 1.0f;
 +
 +    const auto combined_scissor_value_tl = [](s16 scr, s16 win, s16 gen, s16 win_offset) {
 +        return std::max({scr, s16(win + win_offset), s16(gen + win_offset)});
@@ -11800,9 +11957,9 @@ index 2bf5a5d..41a2dea 100644
 +            viewport.height = float(std::min<u32>(instance.GetMaxViewportHeight(), 16_KB));
 +        } else {
 +            const auto xoffset = vp_ctl.xoffset_enable ? vp.xoffset : 0.f;
-+            const auto xscale = vp_ctl.xscale_enable ? vp.xscale : 1.f;
++            const auto xscale = (vp_ctl.xscale_enable ? vp.xscale : 1.f) * ui_fit;
 +            const auto yoffset = vp_ctl.yoffset_enable ? vp.yoffset : 0.f;
-+            const auto yscale = vp_ctl.yscale_enable ? vp.yscale : 1.f;
++            const auto yscale = (vp_ctl.yscale_enable ? vp.yscale : 1.f) * ui_fit;
 +
 +            // bbport: sub-pixel jitter of scene geometry for the temporal upscaler; the same
 +            // shift as jittering the projection.
@@ -12202,10 +12359,10 @@ index 2bf5a5d..41a2dea 100644
 +
 +} // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
-index bddf909..1d6143d 100644
+index bddf909..0446520 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.h
-@@ -1,529 +1,539 @@
+@@ -1,529 +1,540 @@
 -// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 -// SPDX-License-Identifier: GPL-2.0-or-later
 -
@@ -12948,7 +13105,7 @@ index bddf909..1d6143d 100644
 +    void EliminateFastClear();
 +
 +    void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
-+    void UpdateViewportScissorState() const;
++    void UpdateViewportScissorState(const GraphicsPipeline* pipeline) const;
 +    void UpdateDepthStencilState() const;
 +    void UpdatePrimitiveState(bool is_indexed) const;
 +    void UpdateRasterizationState() const;
@@ -13076,6 +13233,7 @@ index bddf909..1d6143d 100644
 +    std::mutex dc_light_lists_mutex;
 +    std::unordered_map<VAddr, std::unique_ptr<VideoCore::Buffer>> dc_light_lists;
 +    std::vector<std::unique_ptr<VideoCore::Buffer>> dc_light_lists_old; ///< may still be in flight
++    std::unordered_map<VAddr, u64> dc_light_guest; ///< the game's lists: address -> size
 +    PipelineCache pipeline_cache;
 +    std::unique_ptr<DrawPreparation> draw_prep;
 +    std::unique_ptr<CameraMotion> camera_motion; // bbport: motion vectors (docs/upscaler.md)
