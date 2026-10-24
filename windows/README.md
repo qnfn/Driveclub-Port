@@ -7,6 +7,12 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.5.1
+
+- **Tunnel lighting above 1080p** (#7): at Render 1440p or 4K the lower part of the screen had no tunnel lighting, with a hard edge across the picture. The game makes its per-tile light lists for 1080p only; they are now sized for the real render size. Idea from driveclub-recomp #145 by HeyOkay; reported by @darkresident.
+- **4:3 and 16:10: menus and HUD fit the screen** (#2): they are no longer cut off at the left and right. The game lays them out in a 16:9 area; on a narrower screen that area is now scaled to the screen's width, with space above and below. `BB_DC_UI_FIT=0` turns it off.
+- **4:3 and 16:10: no more zoomed-in view** (#2): the 3D view keeps the 16:9 width and shows more above and below, instead of losing its sides. Reported by @juanme555.
+
 ## 0.5.0
 
 - **No more crash while an event loads** (#6). The game's render-list sort used each entry's category (0–7) as an unchecked index; a bad one counted outside its eight counters and corrupted the renderer's memory (crashes in the sort, or later with broken pointers). A fix in the game code (`Render list category guard`, always on) keeps every category in range in both passes.
@@ -38,7 +44,7 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 
 ## 0.4.4
 
-- **4:3 and 16:10.** SETUP > Aspect ratio now also has 4:3 and 16:10. The 3D scene renders at the narrower shape with the correct proportions; nothing is stretched. Known issue: the HUD and some menus are cut off at the left and right edges (the game lays them out for 16:9). Requested by @juanme555 (#2).
+- **4:3 and 16:10.** SETUP > Aspect ratio now also has 4:3 and 16:10. The 3D scene renders at the narrower shape with the correct proportions; nothing is stretched. Known issue (fixed in 0.5.1): the HUD and some menus were cut off at the left and right edges. Requested by @juanme555 (#2).
 - **GPU readbacks (missing roadside grass).** SETUP > GPU readbacks (Off / On, off by default). On brings back the grass and bushes along the road edges, and maybe other missing graphics. Expect an FPS loss with it On; how much depends on your PC. Reported by @darkresident (#3).
 
 ## 0.4.3

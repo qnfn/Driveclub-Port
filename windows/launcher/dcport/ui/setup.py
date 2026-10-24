@@ -92,9 +92,9 @@ WIDE_NOTE = ("Ultrawide {w}x{h}: the game renders its scene at the full width an
              "stays in the middle 16:9 area. Field of view: {fov:.2f} (0.50 is the 16:9 view, "
              "{hor:.2f} keeps its height on this screen; higher shows more at the sides but "
              "stretches the edges). Applies on the next PLAY.")
-NARROW_NOTE = ("{shape} {w}x{h}: the game shows the 16:9 view with more above and below. The "
-               "menus and HUD stay 16:9 wide, so their left and right edges are cut off. "
-               "Applies on the next PLAY.")
+NARROW_NOTE = ("{shape} {w}x{h}: the game shows the 16:9 view with more above and below (field "
+               "of view {fov:.2f}). The menus and HUD keep their 16:9 shape and fit the width, "
+               "with space above and below. Applies on the next PLAY.")
 WIDE_HIGH_NOTE = " A higher Render is not available at this aspect ratio: it renders {lines} lines."
 
 
@@ -435,7 +435,8 @@ class SetupPage(tk.Frame):
         if display.custom:
             w, h = display.size
             note = (WIDE_NOTE.format(w=w, h=h, fov=patches.fov(s), hor=patches.hor_plus(s))
-                    if display.wide else NARROW_NOTE.format(shape=patches.aspect(s), w=w, h=h)) + \
+                    if display.wide else NARROW_NOTE.format(shape=patches.aspect(s), w=w, h=h,
+                                                            fov=patches.fov_factor(s))) + \
                 (WIDE_HIGH_NOTE.format(lines=display.lines) if render.size[1] > display.lines else "") + \
                 ("\n\n" + note if high else "")
         hint = patches.screen_hint(app.screen, s)

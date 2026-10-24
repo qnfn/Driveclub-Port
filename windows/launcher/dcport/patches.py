@@ -7,6 +7,7 @@ decides on the 60 FPS patch. data/patches.bin is compiled from that list before 
 so a change applies on the next PLAY without preparing the game again.
 """
 
+import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,7 +90,8 @@ DEFAULT_RESOLUTION = "1080p"
 # scene rendered at the output's shape and display buffers to match, written straight into the
 # 01.28 eboot. After rafidwayne's Driveclub_Widescreen and the Driveclub-PC wrapper's extension
 # of it (both GPL-2.0-or-later). The HUD stays in the centred 16:9 area: on the narrow shapes
-# (4:3, 16:10) that area is wider than the screen, so its left and right edges are cut off.
+# (4:3, 16:10) that area is wider than the screen, and the runtime scales it to fit the width
+# (DcUiFit in vk_rasterizer.cpp).
 ASPECTS = ("4:3", "16:10", "16:9", "21:9", "32:9")
 NARROW_ASPECTS = ("4:3", "16:10")
 DEFAULT_ASPECT = "16:9"
@@ -104,10 +106,14 @@ OUTPUTS = {
 # The game's field-of-view factor is 0.5 at 16:9; the value of the community "FOV fix for wide
 # resolutions" (0.65625) is the default for both wide shapes, tested on 32:9 by players. Hor+
 # (the 16:9 view widened to the screen) is 0.5 * aspect / (16 / 9): 0.67 at 21:9, 1.0 at 32:9.
-# The factor sets the horizontal view, so the narrow shapes keep 0.5: the 16:9 view with more
-# above and below (Vert+).
+# The game's projection (image offset 0x731cb0) keeps the vertical view: m11 = 1 / tan(angle *
+# factor), m00 = m11 / aspect. A narrow shape would lose the sides of the 16:9 view (4:3 looked
+# zoomed in by 4/3), so it gets a wider factor that keeps the 16:9 width with more above and
+# below (Vert+). The factor scales the angle, not its tangent, so it is exact for one view only:
+# NARROW_REF_FOV, about the game's chase and cockpit cameras; others are within a few percent.
 DEFAULT_FOV = 0.65625
 FOV_MIN, FOV_MAX = 0.5, 1.0
+NARROW_REF_FOV = math.radians(50)
 
 # Image offsets in the 01.28 eboot (patch address minus 0x400000).
 _ASPECT = 0x729978  # f32 camera aspect, 16/9
@@ -163,9 +169,16 @@ def fov(s: LauncherSettings) -> float:
     return min(max(float(s.fov), FOV_MIN), FOV_MAX)
 
 
+def narrow_fov(w: int, h: int) -> float:
+    """The factor that keeps the 16:9 view's width on a narrower w x h output (Vert+)."""
+    half = NARROW_REF_FOV * FOV_MIN
+    return math.atan(math.tan(half) * (16 / 9) / (w / h)) / NARROW_REF_FOV
+
+
 def fov_factor(s: LauncherSettings) -> float:
-    """The factor written for the session: the slider on wide shapes, 0.5 on narrow ones."""
-    return FOV_MIN if display(s).narrow else fov(s)
+    """The factor written for the session: the slider on wide shapes, narrow_fov on narrow ones."""
+    d = display(s)
+    return narrow_fov(*d.size) if d.narrow else fov(s)
 
 
 def display(s: LauncherSettings) -> Display:
@@ -197,9 +210,9 @@ def screen_hint(screen: "tuple[int, int] | None", s: LauncherSettings) -> "tuple
         return (f"Screen {w}x{h}: aspect ratio {chosen}", "ok") if chosen != DEFAULT_ASPECT else None
     if wanted == DEFAULT_ASPECT:
         return (f"Screen {w}x{h} is 16:9: set SETUP > Aspect ratio to 16:9", "warn")
-    if wanted in NARROW_ASPECTS:  # optional: the HUD's edges are cut off there
-        return (f"Screen {w}x{h}: SETUP > Aspect ratio {wanted} fills it (the menu and HUD "
-                "edges are cut off)", "ok" if chosen == DEFAULT_ASPECT else "warn")
+    if wanted in NARROW_ASPECTS:  # optional: the menus and HUD stay 16:9 there
+        return (f"Screen {w}x{h}: SETUP > Aspect ratio {wanted} fills it with the 3D view",
+                "ok" if chosen == DEFAULT_ASPECT else "warn")
     return (f"Ultrawide screen {w}x{h}: set SETUP > Aspect ratio to {wanted} for the full "
             "picture", "warn")
 

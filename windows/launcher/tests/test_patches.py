@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
+import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -127,7 +128,11 @@ def test_4_3_narrows_the_scene_and_keeps_the_16_9_view():
     assert d.size == (1440, 1080) and d.narrow and not d.wide
     writes = dict(patches.wide_writes(s))
     assert struct.unpack("<f", writes[0x729978])[0] == struct.unpack("<f", struct.pack("<f", 4 / 3))[0]
-    assert struct.unpack("<f", writes[0x12EFAC4])[0] == 0.5  # the slider is for wide shapes
+    # The slider is for wide shapes; 4:3 widens the angle to keep the 16:9 width (Vert+).
+    factor = struct.unpack("<f", writes[0x12EFAC4])[0]
+    assert round(factor, 3) == 0.637
+    ref = patches.NARROW_REF_FOV
+    assert abs(math.tan(ref * factor) * 4 / 3 - math.tan(ref / 2) * 16 / 9) < 1e-6
     assert struct.unpack("<II", writes[0x754C1B][:4] + writes[0x754C21][:4]) == (1440, 1080)
     assert struct.unpack("<4I", writes[0x12D0540]) == (960, 1440, 1920, 3072)
     assert len(writes) == 5
@@ -146,6 +151,7 @@ def test_narrow_1440_lines():
     assert 1920 * code[2] >> code[5] == 1440  # 1440 x 1.3333 = 1920 wide
     s = LauncherSettings(aspect="16:10", render_res="1440p")
     assert patches.display(s).size == (2304, 1440)
+    assert round(patches.fov_factor(s), 3) == 0.548
     widths = struct_widths(s)
     assert widths[1] == 1728 and round(widths[1] * 4 / 3) == 2304
 
@@ -157,7 +163,7 @@ def struct_widths(s):
 
 def test_narrow_screen_hint():
     text, state = patches.screen_hint((1600, 1200), LauncherSettings())
-    assert state == "ok" and "4:3" in text and "cut off" in text
+    assert state == "ok" and "4:3" in text and "3D view" in text
     assert patches.screen_hint((1600, 1200), LauncherSettings(aspect="4:3"))[1] == "ok"
     assert patches.screen_hint((1600, 1200), LauncherSettings(aspect="32:9"))[1] == "warn"
     assert patches.screen_hint((1920, 1080), LauncherSettings(aspect="4:3"))[1] == "warn"
