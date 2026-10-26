@@ -86,6 +86,19 @@ RESOLUTIONS = (
 )
 DEFAULT_RESOLUTION = "1080p"
 
+# Upscaling (SETUP > Anti-aliasing, with FSR or DLSS on): the engine draws its scene smaller
+# through its own -resolutionscale, the output (display buffers) keeps the Render resolution,
+# and the runtime upscales the finished picture where the game scales it into the display
+# buffer. Output size over scene size per mode.
+UPSCALES = (
+    ("native", "Native", 1.0),
+    ("quality", "Quality", 1.5),
+    ("balanced", "Balanced", 1.7),
+    ("performance", "Performance", 2.0),
+    ("ultra_performance", "Ultra Perf.", 3.0),
+)
+DEFAULT_UPSCALE = "native"
+
 # Other aspect ratios (SETUP > Aspect ratio): the game's camera aspect, the field of view, its
 # scene rendered at the output's shape and display buffers to match, written straight into the
 # 01.28 eboot. After rafidwayne's Driveclub_Widescreen and the Driveclub-PC wrapper's extension
@@ -241,16 +254,49 @@ def _scene_width(table_width: int, w: int, h: int) -> int:
     return max(int((scaled + 64) // 128) * 128, table_width)
 
 
-def _height_code(w: int, h: int) -> bytes:
+def _height_factor(w: int, h: int) -> tuple[int, int]:
     """The scene height as width * h / w: k / 2^n with the largest n that keeps k an imm8."""
     n = 0
     while n < 16 and round(h / w * (1 << (n + 1))) <= 127:
         n += 1
-    k = round(h / w * (1 << n))
+    return round(h / w * (1 << n)), n
+
+
+def _height_code(w: int, h: int) -> bytes:
+    k, n = _height_factor(w, h)
     return bytes((0x6B, 0xC9, k, 0xC1, 0xE9, n)) + bytes.fromhex("898d54ffffff")
 
 
-def wide_writes(s: LauncherSettings) -> list[tuple[int, bytes]]:
+def upscale_factor(key: str) -> float:
+    """Output size over scene size for an UPSCALES key (1.0 for Native or an unknown key)."""
+    return next((f for k, _, f in UPSCALES if k == key), 1.0)
+
+
+def _engine_scale(table_width: int, lines: int, factor: float) -> float:
+    """The -resolutionscale for `lines` output lines drawn `factor` times smaller. The engine
+    makes the scene width (int(table_width * scale) + 127) & ~127: the scale is picked half a
+    step under the multiple of 128 nearest the wanted width, so it lands there exactly."""
+    wanted = table_width * lines / 1080 / factor
+    width = max(int(wanted / 128 + 0.5), 4) * 128
+    return (width - 64) / table_width
+
+
+def scene_size(s: LauncherSettings, upscale: float = 1.0) -> tuple[int, int]:
+    """The engine's scene size for the session (as the engine rounds it)."""
+    d = display(s)
+    w, h = d.size
+    table = _scene_width(1920, w, h) if d.custom else 1920
+    if upscale == 1.0 and d.lines == 1080:
+        return table, h
+    scale = _engine_scale(table, d.lines, upscale) if upscale != 1.0 else d.lines / 1080
+    width = (int(table * float(f"{scale:.4f}")) + 127) & ~127
+    if not d.custom:
+        return width, width * 9 // 16
+    k, n = _height_factor(w, h)
+    return width, (width * k) >> n
+
+
+def wide_writes(s: LauncherSettings, upscale: float = 1.0) -> list[tuple[int, bytes]]:
     """The aspect-ratio writes (image offset, bytes) for the session; none at 16:9."""
     d = display(s)
     if not d.custom:
@@ -263,7 +309,7 @@ def wide_writes(s: LauncherSettings) -> list[tuple[int, bytes]]:
         (_VIDEO_OUT[1], struct.pack("<I", h)),
         (_SCENE_WIDTHS, struct.pack("<4I", *(_scene_width(t, w, h) for t in _TABLE_WIDTHS))),
     ]
-    if d.lines != 1080:  # the engine's -resolutionscale
+    if d.lines != 1080 or upscale != 1.0:  # the engine's -resolutionscale
         writes.append((_HEIGHT_SITE, _height_code(w, h)))
     return writes
 
@@ -292,8 +338,11 @@ def patch_names(s: LauncherSettings) -> list[str]:
     return names
 
 
-def game_args(s: LauncherSettings) -> str:
+def game_args(s: LauncherSettings, upscale: float = 1.0) -> str:
     d = display(s)
+    if upscale != 1.0:
+        table = _scene_width(1920, *d.size) if d.custom else 1920
+        return f"-resolutionscale {_engine_scale(table, d.lines, upscale):.4f}"
     if d.custom:
         return "-resolutionscale 1.3333" if d.lines == 1440 else ""
     return resolution(s.render_res).game_args
@@ -339,12 +388,13 @@ def build(game_dir: Path, xml: Path, out: Path, names: list[str],
     tmp.replace(out)
 
 
-def build_for_session(paths, game_dir: Path, s: LauncherSettings) -> "str | None":
+def build_for_session(paths, game_dir: Path, s: LauncherSettings,
+                      upscale: float = 1.0) -> "str | None":
     """data/patches.bin for the settings; returns an error to show, the game still starts
     with the previous patches.bin."""
     try:
         build(game_dir, paths.patches_xml, paths.data / "patches.bin", patch_names(s),
-              wide_writes(s))
+              wide_writes(s, upscale))
     except (OSError, ValueError, ImportError) as e:
         return f"Could not apply the patches: {e}"
     return None

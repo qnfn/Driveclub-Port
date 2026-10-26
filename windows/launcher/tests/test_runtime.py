@@ -114,3 +114,41 @@ def test_languages_per_region():
     assert len(eu) == 14 and "19" in eu and "17" not in eu
     assert set(us) == {"1", "2", "17", "20"}
     assert set(dict(LANGUAGES)) == set(eu) | set(us)
+
+
+def test_upscaling_only_with_fsr_or_dlss_on(tmp_path):
+    from dcport.runtime import session_upscale
+    paths = AppPaths.for_root(tmp_path)
+    paths.ini.parent.mkdir(parents=True, exist_ok=True)
+    s = LauncherSettings(upscale="quality")
+    assert session_upscale(paths, s, fsr=True) == 1.5  # FSR 3.1 when dcport.ini has none
+    assert game_env(paths, s, fsr=True, base={})["DC_GAME_ARGS"] == "-resolutionscale 0.6333"
+    assert session_upscale(paths, s, fsr=False) == 1.0
+    assert "DC_GAME_ARGS" not in game_env(paths, s, fsr=False, base={})
+    paths.ini.write_text("upscaler=off" + chr(10), encoding="utf-8")
+    assert session_upscale(paths, s, fsr=True) == 1.0
+    paths.ini.write_text("upscaler=fsr4" + chr(10), encoding="utf-8")
+    assert session_upscale(paths, LauncherSettings(upscale="performance"), fsr=True) == 2.0
+
+
+def test_scaling_follows_the_in_game_menu(tmp_path):
+    from dcport.runtime import scaling, scaling_ini, session_upscale
+    paths = AppPaths.for_root(tmp_path)
+    paths.ini.parent.mkdir(parents=True, exist_ok=True)
+    s = LauncherSettings(upscale="quality")
+    assert scaling(paths, s) == "quality"  # no dcport.ini preset: the launcher's setting
+    paths.ini.write_text("upscaler=fsr4" + chr(10) + "preset=3" + chr(10), encoding="utf-8")
+    assert scaling(paths, s) == "performance"
+    assert session_upscale(paths, s, fsr=True) == 2.0
+    paths.ini.write_text("preset=9" + chr(10), encoding="utf-8")
+    assert scaling(paths, s) == "quality"
+    assert scaling_ini("balanced") == {"preset": "2"} and scaling_ini("x") == {"preset": "0"}
+
+
+def test_restart_command_runs_the_launcher_again(tmp_path):
+    paths = AppPaths.for_root(tmp_path)
+    s = LauncherSettings()
+    assert "BB_RESTART_COMMAND" not in game_env(paths, s, fsr=True, base={"BB_RESTART_COMMAND": "x"})
+    (tmp_path / "DriveClub.exe").write_bytes(b"")
+    env = game_env(paths, s, fsr=True, base={})
+    assert env["BB_RESTART_COMMAND"] == f'"{tmp_path / "DriveClub.exe"}" --play'

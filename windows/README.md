@@ -7,6 +7,13 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.5.3
+
+- **Upscaling: Scaling presets** (FSR edition, new, not fully tested yet): SETUP > Anti-aliasing > Scaling, also in the game's menu (Insert / L3+R3). Native (the default) keeps FSR / DLSS as anti-aliasing at the full render size, as before. Quality (x1.5), Balanced (x1.7), Performance (x2) and Ultra Performance (x3) make the game draw its scene smaller; FSR 3.1, FSR 4 or DLSS then rebuild the full picture after the game's own effects, where the game scales the scene into the display buffer, so the HUD stays sharp. More FPS, a little softer.
+- **Change Scaling in the game**: the menu's Scaling setting is saved to `dcport.ini` (shared with the launcher); "Apply and restart" starts the game again through the launcher with the new size (a race in progress is lost).
+- **FSR keeps its history** (#9): the HUD's draws into the display buffer reset FSR every frame, so it barely accumulated and looked close to Off. It now resets only after a pause of more than 200 ms.
+- The game menu no longer says FSR and DLSS are "not an upscaler" (the text was also cut off).
+
 ## 0.5.2
 
 - **Tunnel lighting above 1080p, now also with Threading on** (#2, #7): the 0.5.1 fix sized the game's light lists for the render size, but with threaded recording the count that tells the game how many to fill was never raised, so the hard edge across tunnels stayed (at 1440p, 4K and 4:3 1920x1440). It is now raised on both paths.
@@ -166,7 +173,7 @@ No game files are included. You need your own dump of DRIVECLUB 01.28, EU (CUSA0
 2. The first time, choose your game folder. On the first PLAY, DCport prepares the game files on your PC (once, under a minute).
 3. The launcher has six tabs:
    - **RACE**: game art, ready checks, PLAY, quick frame rate, window and FPS counter
-   - **SETUP**: game folder, player name, language, frame rate (30–240, tested up to 120), window mode and size, FPS counter, threading; FSR edition: anti-aliasing (FSR 3.1 / 4 / 4.1.1), sharpness, FSR 4.1.1 set-up
+   - **SETUP**: game folder, player name, language, frame rate (30–240, tested up to 120), window mode and size, FPS counter, threading; FSR edition: anti-aliasing (FSR 3.1 / 4 / 4.1.1 / DLSS), scaling, sharpness, FSR 4.1.1 set-up
    - **PATCHES**: community game patches (frame-rate patch type, no barriers, no reset, no motion blur/DOF, photo mode)
    - **CONTROLS**: keyboard and controller bindings
    - **GARAGE**: save profiles, backups with restore, shader cache, desktop shortcut, Add to Steam

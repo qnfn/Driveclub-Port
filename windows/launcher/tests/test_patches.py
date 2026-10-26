@@ -167,3 +167,28 @@ def test_narrow_screen_hint():
     assert patches.screen_hint((1600, 1200), LauncherSettings(aspect="4:3"))[1] == "ok"
     assert patches.screen_hint((1600, 1200), LauncherSettings(aspect="32:9"))[1] == "warn"
     assert patches.screen_hint((1920, 1080), LauncherSettings(aspect="4:3"))[1] == "warn"
+
+
+def test_upscaling_draws_the_scene_smaller_through_the_engine_scale():
+    s = LauncherSettings()
+    sizes = {k: patches.scene_size(s, f) for k, _, f in patches.UPSCALES}
+    assert sizes == {"native": (1920, 1080), "quality": (1280, 720), "balanced": (1152, 648),
+                     "performance": (1024, 576), "ultra_performance": (640, 360)}
+    # The engine rounds (int(1920 * scale) + 127) & ~127: the scale lands on the wanted width.
+    assert patches.game_args(s, 1.5) == "-resolutionscale 0.6333"
+    assert (int(1920 * 0.6333) + 127) & ~127 == 1280
+    assert patches.game_args(s, 1.0) == ""
+    assert patches.scene_size(LauncherSettings(render_res="2160p"), 2.0) == (1920, 1080)
+    assert patches.scene_size(LauncherSettings(render_res="1440p"), 1.5) == (1664, 936)
+    assert patches.upscale_factor("ultra_performance") == 3.0
+    assert patches.upscale_factor("nonsense") == 1.0
+
+
+def test_upscaling_on_a_narrow_screen_rewrites_the_scale_height():
+    s = LauncherSettings(aspect="4:3")
+    assert patches.game_args(s) == ""
+    assert 0x4DC37A not in dict(patches.wide_writes(s))
+    assert patches.game_args(s, 1.5) == "-resolutionscale 0.6667"
+    code = dict(patches.wide_writes(s, 1.5))[0x4DC37A]
+    assert 1024 * code[2] >> code[5] == 768
+    assert patches.scene_size(s, 1.5) == (1024, 768)

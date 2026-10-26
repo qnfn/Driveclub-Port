@@ -69,10 +69,10 @@ index 7ed911d..19efb6d 100644
      }
      const auto micros = timo ? *timo : 0u;
 diff --git a/gpu/shadps4/core/libraries/videoout/driver.cpp b/gpu/shadps4/core/libraries/videoout/driver.cpp
-index 432c3a4..79491e2 100644
+index 432c3a4..042e608 100644
 --- a/gpu/shadps4/core/libraries/videoout/driver.cpp
 +++ b/gpu/shadps4/core/libraries/videoout/driver.cpp
-@@ -1,724 +1,786 @@
+@@ -1,724 +1,798 @@
 -// SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 -// SPDX-License-Identifier: GPL-2.0-or-later
 -
@@ -1020,6 +1020,12 @@ index 432c3a4..79491e2 100644
 +            .address_right = 0,
 +        };
 +        Vulkan::FrameCapture::AddDisplayBuffer(address);
++        Vulkan::FrameCapture::display_width = attribute->width;
++        Vulkan::FrameCapture::display_height = attribute->height;
++        std::printf("VideoOut: display buffer %u at %#llx, %ux%u (pitch %u), %s\n",
++                    startIndex + i, static_cast<unsigned long long>(address), attribute->width,
++                    attribute->height, attribute->pitch_in_pixel,
++                    GetPixelFormatString(attribute->pixel_format).data());
 +
 +        // Reset flip label also when registering buffer
 +        port->buffer_labels[startIndex + i] = 0;
@@ -1084,6 +1090,12 @@ index 432c3a4..79491e2 100644
 +             static_cast<u32>(attribute->tiling_mode), attribute->width, attribute->height,
 +             attribute->pitch_in_pixel, attribute->option);
 +
++    static u32 told = 0;
++    if (told++ < 8) {
++        std::printf("VideoOut: display group %d now %ux%u (pitch %u), %s\n", attributeIndex,
++                    attribute->width, attribute->height, attribute->pitch_in_pixel,
++                    GetPixelFormatString(attribute->pixel_format).data());
++    }
 +    std::unique_lock lock{port->port_mutex};
 +    std::memcpy(&port->groups[attributeIndex].attrib, attribute, sizeof(BufferAttribute));
 +    return 0;
@@ -3520,6 +3532,20 @@ index 420d313..903e897 100644
 +};
 +
 +} // namespace Vulkan
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_frame_capture.h b/gpu/shadps4/video_core/renderer_vulkan/vk_frame_capture.h
+index dc4d978..f434ad6 100644
+--- a/gpu/shadps4/video_core/renderer_vulkan/vk_frame_capture.h
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_frame_capture.h
+@@ -28,6 +28,9 @@ public:
+     /// in the GPU command stream (the flip itself runs a frame behind).
+     static void AddDisplayBuffer(VAddr address);
+     static bool IsDisplayBuffer(VAddr address);
++    /// DCport: the size of the display buffers last registered (the game's output size; other
++    /// targets can start at a display buffer's address too).
++    static inline std::atomic<u32> display_width{0}, display_height{0};
+ 
+     /// GPU thread: whether passes are being looked at (armed or recording; cheap).
+     static bool Active() {
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_frame_generation.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_frame_generation.cpp
 index c276c2f..b03ff57 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_frame_generation.cpp
@@ -4094,10 +4120,10 @@ index e5e14b1..79439cd 100644
          cmdbuf.endDebugUtilsLabelEXT();
      }
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-index 2bf5a5d..543d283 100644
+index 2bf5a5d..98a220d 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-@@ -1,3734 +1,4526 @@
+@@ -1,3734 +1,4542 @@
 -// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 -// SPDX-License-Identifier: GPL-2.0-or-later
 -
@@ -9114,6 +9140,10 @@ index 2bf5a5d..543d283 100644
 +        scheduler.PopPendingOperations();
 +    }
 +    const auto& regs = Regs();
++    // DCport: Driveclub's upscaling looks for the draw scaling the scene to the output size.
++    if (upscaler->DcLatePending()) {
++        upscaler->OnDcDraw(regs.color_buffers[0] ? regs.color_buffers[0].Address() : 0);
++    }
 +    // bbport: the pass copying a finished frame to a display buffer; the previous draw's
 +    // target is that frame.
 +    if (camera_motion->Enabled() && regs.color_buffers[0] &&
@@ -10465,18 +10495,24 @@ index 2bf5a5d..543d283 100644
 +}
 +
 +// Number of 16x16 tiles of the render size both light shaders read from their buffer 0
-+// (dwords 22 and 23), 0 if it can't be read.
++// (dwords 22 and 23), 0 if it can't be read. With threaded recording the shader reads its
++// buffer 0 from the constant ring copy (`copied`, made when the draw was collected); the guest
++// memory may hold the next view's constants by then (the rear-view mirror after the main view).
 +static u32 DcLightTiles(const Shader::Info& stage, const PreparedStage* prepared,
-+                        Core::MemoryManager* memory) {
++                        Core::MemoryManager* memory, const u32* copied = nullptr) {
 +    if (stage.buffers.empty() || stage.buffers[0].IsSpecial()) {
 +        return 0;
 +    }
-+    const auto constants = prepared ? prepared->buffer_sharps[0] : stage.buffers[0].GetSharp(stage);
-+    if (constants.base_address == 0 || constants.GetSize() < 24 * sizeof(u32) ||
-+        !memory->IsValidGpuMapping(constants.base_address, 24 * sizeof(u32))) {
-+        return 0;
++    const u32* words = copied;
++    if (!words) {
++        const auto constants =
++            prepared ? prepared->buffer_sharps[0] : stage.buffers[0].GetSharp(stage);
++        if (constants.base_address == 0 || constants.GetSize() < 24 * sizeof(u32) ||
++            !memory->IsValidGpuMapping(constants.base_address, 24 * sizeof(u32))) {
++            return 0;
++        }
++        words = reinterpret_cast<const u32*>(constants.base_address);
 +    }
-+    const auto* words = reinterpret_cast<const u32*>(constants.base_address);
 +    const u32 width = words[22];
 +    const u32 height = words[23];
 +    if (width == 0 || height == 0 || width > 8192 || height > 8192) {
@@ -10682,7 +10718,13 @@ index 2bf5a5d..543d283 100644
 +                const bool dc_list_reader =
 +                    stage.pgm_hash == DcAmbientShader && buffer_index == 1 && !desc.is_written;
 +                if ((dc_list_writer || dc_list_reader) && DcLightCullFix()) {
-+                    const u32 tiles = DcLightTiles(stage, prepared, memory);
++                    const RingBinding* constants =
++                        num_ring_stages ? FindRingBinding(stage, 0) : nullptr;
++                    const u32* copied =
++                        constants && constants->size >= 24 * sizeof(u32)
++                            ? reinterpret_cast<const u32*>(constant_ring->Data(constants->offset))
++                            : nullptr;
++                    const u32 tiles = DcLightTiles(stage, prepared, memory, copied);
 +                    dc_tiles = tiles;
 +                    const u64 needed = u64(tiles) * DcLightListStride;
 +                    if (needed > size) {
@@ -13663,7 +13705,7 @@ index 0a2fea3..47435e6 100644
  
      for (vk::Semaphore& semaphore : image_acquired) {
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
-index 7c2da3f..504e386 100644
+index 7c2da3f..9084f1f 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
 @@ -7,6 +7,7 @@
@@ -13705,7 +13747,7 @@ index 7c2da3f..504e386 100644
      if (const char* hash = std::getenv("BB_UPSCALE_BEFORE_CS")) {
          trigger_hash = std::strtoull(hash, nullptr, 16);
      }
-@@ -293,12 +303,16 @@ bool TemporalUpscaler::OnFrameStart() {
+@@ -293,12 +303,26 @@ bool TemporalUpscaler::OnFrameStart() {
      const auto& settings = BbSettings::Get();
      // The guest's startup resolution patch remains in effect until restart. Keep the FSR
      // model at the applied preset while the menu saves the requested one for run.sh.
@@ -13714,7 +13756,18 @@ index 7c2da3f..504e386 100644
 +    const int preset = dc_mode ? 0 : BbSettings::RenderPreset();
      if (applied_preset != preset || settings.upscaler == BbSettings::UpscalerOff) failed = false;
      const bool active = Active();
-     const bool jitter_on = active && settings.jitter && !BbToggle::Disabled(1u << 25);
+-    const bool jitter_on = active && settings.jitter && !BbToggle::Disabled(1u << 25);
++    // Driveclub upscaling jitters even with the menu's jitter off: without it the upscaler has
++    // no detail between the scene's pixels to rebuild. BB_DC_UPSCALE_JITTER=<scale> sets its
++    // size (0: none).
++    static const float dc_jitter_scale = [] {
++        const char* env = std::getenv("BB_DC_UPSCALE_JITTER");
++        return env ? std::clamp(float(std::atof(env)), 0.0f, 1.0f) : 1.0f;
++    }();
++    const bool dc_upscaling = dc_mode && DcUpscaling(dc_scene_width, dc_scene_height);
++    const bool jitter_on = active &&
++                           (settings.jitter || (dc_upscaling && dc_jitter_scale > 0.0f)) &&
++                           !BbToggle::Disabled(1u << 25);
      const int upscaler = settings.upscaler.load();
 -    const int output = settings.output_res.load();
 +    // Driveclub: the scene stays 1920x1080 (the window's FSR 1 pass scales the finished frame
@@ -13724,7 +13777,7 @@ index 7c2da3f..504e386 100644
      // Ultrawide outputs apply after a restart (startup patch), not live.
      const bool output_changed = !scaled_session && applied_output != output &&
                                  !BbSettings::Ultrawide(output);
-@@ -313,7 +327,11 @@ bool TemporalUpscaler::OnFrameStart() {
+@@ -313,7 +337,11 @@ bool TemporalUpscaler::OnFrameStart() {
                           jitter_on != last_jitter || applied_upscaler != upscaler;
      if (applied_upscaler != upscaler) {
          // A failed provider keeps a fatal flag internally; a user retry gets a fresh context.
@@ -13737,7 +13790,22 @@ index 7c2da3f..504e386 100644
          fsr4 = std::make_unique<Fsr4Upscaler>(instance, scheduler);
          if (BbSettings::IsFsr4(upscaler)) BbSettings::Get().fsr4_problem = nullptr;
      }
-@@ -346,6 +364,12 @@ bool TemporalUpscaler::OnFrameStart() {
+@@ -328,7 +356,13 @@ bool TemporalUpscaler::OnFrameStart() {
+     }
+     BbSettings::Get().active_render_width = Scaled() ? render_width : scene_targets.Size().width;
+     BbSettings::Get().active_render_height = Scaled() ? render_height : scene_targets.Size().height;
+-    if (changed || !dispatched_last_frame) reset = true;
++    // Driveclub: every draw into the display buffer comes here (the frame's copy, then each HUD
++    // draw), so a missing upscale since the last call says nothing about the frame; RunDriveclub
++    // restarts the history after a gap without scenes instead. (Reset here, the HUD's draws
++    // threw the history away every frame and FSR only smoothed edges spatially.)
++    // BB_DC_RESET_PER_DRAW=1 brings the old behaviour back (A/B).
++    static const bool reset_per_draw = std::getenv("BB_DC_RESET_PER_DRAW") != nullptr;
++    if (changed || (!dispatched_last_frame && (!dc_mode || reset_per_draw))) reset = true;
+     if (changed) jitter_index = 0;
+     applied_preset = preset;
+     applied_output = output;
+@@ -346,6 +380,12 @@ bool TemporalUpscaler::OnFrameStart() {
      hudless_pending = false;
      ldr_target = {};
      scene_color = {};
@@ -13750,17 +13818,49 @@ index 7c2da3f..504e386 100644
      snapshot_taken = false;
      opaque_valid = false;
      mask_ready = false;
-@@ -364,6 +388,9 @@ bool TemporalUpscaler::OnFrameStart() {
+@@ -354,16 +394,40 @@ bool TemporalUpscaler::OnFrameStart() {
+         jitter = {};
+         return changed;
+     }
++    // Driveclub: once per scene, not per display draw (two draws a frame would step the Halton
++    // sequence by two and leave x in one half of the pixel).
++    if (dc_mode && !changed) {
++        if (!dc_jitter_due) {
++            return changed;
++        }
++        dc_jitter_due = false;
++    }
+     // CameraMotion::OnDisplayPass has already cleared Depth(). Use the context's render
+     // size, which survives the frame boundary (Performance 960 -> 1920 needs 32 phases).
+-    const u32 phases = Scaled() ? Motion::JitterPhases(render_width, target_width)
++    const u32 phases = dc_upscaling ? Motion::JitterPhases(dc_scene_width, dc_out_width)
++        : Scaled() ? Motion::JitterPhases(render_width, target_width)
+         : Motion::JitterPhases(scene_targets.Size().width, 1920);
+     jitter_index = jitter_index % phases + 1;
+     jitter = {Halton(jitter_index, 2) - 0.5f, Halton(jitter_index, 3) - 0.5f};
++    if (dc_upscaling && !settings.jitter) {
++        // Driveclub's lighting, shadows and road mirage rebuild positions from depth with the
++        // unjittered camera: a full scene pixel of jitter shimmers there once a scene pixel
++        // covers several output pixels. Scaled by scene / output size, the samples still
++        // cover every output pixel's centre and the error stays below an output pixel.
++        const float k = dc_jitter_scale * float(dc_scene_width) / float(dc_out_width);
++        jitter = {jitter[0] * k, jitter[1] * k};
++    }
+     return changed;
  }
  
  void TemporalUpscaler::OnDispatch(u64 cs_hash) {
 +    if (dc_mode) {
++        if (dc_scan_left && dc_late.pending) {
++            --dc_scan_left;
++            std::printf("DC scan: dispatch %016llx\n", static_cast<unsigned long long>(cs_hash));
++        }
 +        return; // RunDriveclub, called by the rasterizer with the resolve's buffers
 +    }
      if (cs_hash != trigger_hash || done_this_frame) {
          return;
      }
-@@ -426,9 +453,12 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
+@@ -426,9 +490,12 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
      FfxVkPortableUpscaleCreateInfo create_info{};
      create_info.structSize = sizeof(create_info);
      // Native AA runs on the HDR scene color; scaled presets on the game's tonemapped frame.
@@ -13776,7 +13876,15 @@ index 7c2da3f..504e386 100644
      create_info.maxRenderSize = {w, h};
      create_info.maxOutputSize = {ow, oh};
      // FSR 4 has its own model context (vk_fsr4); the images below are shared.
-@@ -457,7 +487,9 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
+@@ -448,6 +515,7 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
+     const auto allocator = instance.GetAllocator();
+     motion_view.reset();
+     output_view.reset();
++    dc_output_views.clear();
+     motion_image = VideoCore::UniqueImage(device, allocator);
+     motion_image.Create(vk::ImageCreateInfo{
+         .imageType = vk::ImageType::e2D,
+@@ -457,7 +525,9 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
          .arrayLayers = 1,
          .samples = vk::SampleCountFlagBits::e1,
          .tiling = vk::ImageTiling::eOptimal,
@@ -13787,7 +13895,7 @@ index 7c2da3f..504e386 100644
          .initialLayout = vk::ImageLayout::eUndefined,
      });
      output_image = VideoCore::UniqueImage(device, allocator);
-@@ -485,6 +517,27 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
+@@ -485,6 +555,27 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
          .format = vk::Format::eR16G16Sfloat,
          .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
      }));
@@ -13815,7 +13923,7 @@ index 7c2da3f..504e386 100644
      const auto make_image = [&](VideoCore::UniqueImage& image, vk::UniqueImageView& view,
                                  vk::Format format, vk::ImageUsageFlags usage, u32 iw = 0,
                                  u32 ih = 0, vk::ImageAspectFlags aspect =
-@@ -1287,6 +1340,61 @@ void TemporalUpscaler::CaptureFrameGen() {
+@@ -1287,6 +1378,61 @@ void TemporalUpscaler::CaptureFrameGen() {
      }
  }
  
@@ -13877,8 +13985,69 @@ index 7c2da3f..504e386 100644
  namespace {
  /// BB_FRAME_GEN_HUDLESS=0: the generated frames are interpolated with the UI (diagnosis).
  bool HudlessWanted() {
-@@ -2118,9 +2226,9 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image
-         .preset = applied_preset,
+@@ -1399,6 +1545,12 @@ std::array<u32, 2> TemporalUpscaler::SceneSize(u32 w, u32 h) const {
+ 
+ float TemporalUpscaler::SceneMipBias() const {
+     if (!Active() || BbSettings::Get().upscaler == BbSettings::UpscalerTaa) return 0.0f;
++    if (dc_mode) {
++        // Driveclub's upscaling: the materials' mip level of the output size.
++        return DcUpscaling(dc_scene_width, dc_scene_height)
++                   ? std::log2(float(dc_scene_width) / float(dc_out_width))
++                   : 0.0f;
++    }
+     const float render = float(BbSettings::Get().active_render_width.load());
+     const float output = float(Scaled() ? target_width : 1920u);
+     return render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
+@@ -2031,6 +2183,27 @@ bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target) {
+ bool TemporalUpscaler::RedirectSampled(VideoCore::ImageId image,
+                                        const VideoCore::ImageViewInfo& info, vk::ImageView& view,
+                                        vk::ImageLayout& layout) {
++    if (dc_scan_left && dc_late.pending) {
++        static std::mutex scan_mutex;
++        std::scoped_lock lock{scan_mutex};
++        const auto& seen = texture_cache.GetImage(image).info;
++        std::printf("DC scan:   reads %ux%u %s at %#llx\n", seen.size.width, seen.size.height,
++                    vk::to_string(seen.pixel_format).c_str(),
++                    static_cast<unsigned long long>(seen.guest_address));
++    }
++    if (DcComposites(image)) {
++        if (!dc_late.done) {
++            dc_late.done = true;
++            dc_late.ok = RunDcComposite(image);
++        }
++        if (!dc_late.ok) {
++            return false;
++        }
++        // Read with the swizzle of the game's view (its T#'s destination select).
++        view = DcOutputView(LiverpoolToVK::ComponentMapping(info.mapping));
++        layout = vk::ImageLayout::eGeneral;
++        return true;
++    }
+     if (!display_redirect || image != ui_color) {
+         return false;
+     }
+@@ -2107,6 +2280,15 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image
+     // Same jitter convention as FSR 3; the menu (or toggle 1 << 26) flips it for tests.
+     const float sign =
+         BbToggle::Disabled(1u << 26) != settings.fsr4_invert_jitter.load() ? -1.0f : 1.0f;
++    // The model for the scale: Driveclub's comes from the engine's scene size (its widths are
++    // multiples of 128, so 1.5, 1.67, 1.88 and 3 at 1080p).
++    const float ratio = float(ow) / float(w);
++    const int preset = !dc_mode ? applied_preset
++                       : ratio < 1.25f ? 0
++                       : ratio < 1.6f  ? 1
++                       : ratio < 1.8f  ? 2
++                       : ratio < 2.5f  ? 3
++                                       : 4;
+     const bool ok = fsr4->Record({
+         .cmdbuf = cmdbuf,
+         .color = color,
+@@ -2115,12 +2297,12 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image
+         .output = {vk::Image(output_image), *output_view, ow, oh},
+         .render_width = w,
+         .render_height = h,
+-        .preset = applied_preset,
++        .preset = preset,
          .jitter = {sign * jitter[0], sign * jitter[1]},
          .frame_ms = frame_ms,
 -        .near_plane = camera_motion.Near(),
@@ -13890,7 +14059,7 @@ index 7c2da3f..504e386 100644
          .sharpness = std::min(settings.sharpness.load(), 1.0f),
          .sharpen = settings.sharpen,
          .reset = reset,
-@@ -2158,7 +2266,9 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
+@@ -2158,7 +2340,9 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
                                    const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh,
                                    float frame_ms, bool hdr) {
      Dlss* dlss = Dlss::Get();
@@ -13901,7 +14070,7 @@ index 7c2da3f..504e386 100644
      bool ok = true;
      if (!dlss->HasFeature(desc)) {
          // The previous feature may still be in use by submitted work; `cmdbuf` stays open.
-@@ -2194,4 +2304,404 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
+@@ -2194,4 +2378,572 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
      return ok;
  }
  
@@ -13936,6 +14105,19 @@ index 7c2da3f..504e386 100644
 +    // The display buffer before the HUD: frame generation's picture without UI (10-bit and
 +    // HDR buffers are skipped, and the HUD then stays in the interpolated frames).
 +    CaptureHudless(display);
++}
++
++void TemporalUpscaler::OnDcDraw(VAddr color_address) {
++    // Upscaling: the first draw into a display buffer after the resolve is the game's copy of
++    // the finished frame (its tonemap, with the bloom and the exposure), which samples the
++    // scene's picture and scales it to the output size. RedirectSampled hands it the upscale;
++    // the HUD's draws that follow sample no scene-size picture.
++    dc_late.composite = dc_late.pending && FrameCapture::IsDisplayBuffer(color_address);
++    if (dc_scan_left && dc_late.pending) {
++        --dc_scan_left;
++        std::printf("DC scan: draw into MRT0 at %#llx\n",
++                    static_cast<unsigned long long>(color_address));
++    }
 +}
 +
 +void TemporalUpscaler::CreateDcPipelines() {
@@ -14010,6 +14192,21 @@ index 7c2da3f..504e386 100644
 +        return false;
 +    }
 +    done_this_frame = true;
++    dc_jitter_due = true;
++    if (dc_late.pending && !dc_late.done) {
++        static bool told = false;
++        if (!told) {
++            told = true;
++            std::printf("Upscaler (Driveclub): no draw scaled the %ux%u scene to %ux%u; the "
++                        "game's own scaling showed it\n",
++                        dc_scene_width, dc_scene_height, dc_out_width, dc_out_height);
++        }
++    }
++    dc_late = {};
++    // The display buffers' size (other targets, 512x256 and 2048x2048 in menus, start at a
++    // display buffer's address too).
++    dc_out_width = FrameCapture::display_width.load(std::memory_order_relaxed);
++    dc_out_height = FrameCapture::display_height.load(std::memory_order_relaxed);
 +    const int provider = BbSettings::Get().upscaler.load();
 +    if (failed || !Active() || provider == BbSettings::UpscalerTaa || !dc_depth ||
 +        !dc_object_ids || !dc_color) {
@@ -14046,7 +14243,10 @@ index 7c2da3f..504e386 100644
 +        }
 +        return false;
 +    }
-+    if (!EnsureResources(w, h, w, h, true)) {
++    dc_scene_width = w;
++    dc_scene_height = h;
++    const bool upscale = DcUpscaling(w, h);
++    if (!EnsureResources(w, h, upscale ? dc_out_width : w, upscale ? dc_out_height : h, true)) {
 +        failed = true;
 +        return false;
 +    }
@@ -14165,6 +14365,7 @@ index 7c2da3f..504e386 100644
 +    float frame_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
 +    if (frame_ms <= 0.0f || frame_ms > 200.0f) {
 +        frame_ms = 16.6f;
++        reset = true; // no scene for a while (loading, a menu without one): stale history
 +    }
 +    last_frame = now;
 +    // For the presenter's frame generation at this frame's flip.
@@ -14177,83 +14378,25 @@ index 7c2da3f..504e386 100644
 +        CaptureDcFrameGen(cmdbuf, w, h, reset);
 +    }
 +
-+    bool dispatched = false;
-+    if (UseFsr4()) {
-+        dispatched = RecordFsr4(cmdbuf, {color.GetImage(), color_view, w, h},
-+                                {depth.GetImage(), depth_view, w, h}, w, h, w, h, frame_ms);
-+    } else if (UseDlss()) {
-+        // DCport: DLAA at the scene size (HDR colour with automatic exposure, as FSR 3 gets).
-+        dispatched = RecordDlss(cmdbuf,
-+                                {color.GetImage(), color_view, color.info.pixel_format,
-+                                 vk::ImageAspectFlagBits::eColor, w, h},
-+                                {depth.GetImage(), depth_view, depth.info.pixel_format,
-+                                 vk::ImageAspectFlagBits::eDepth, w, h},
-+                                w, h, w, h, frame_ms, true);
-+    } else {
-+        FfxVkPortableUpscaleDispatchInfo info{};
-+        info.structSize = sizeof(info);
-+        info.commandBuffer = cmdbuf;
-+        info.color = Describe(color.GetImage(), color.info.pixel_format, w, h, color.usage_flags,
-+                              vk::ImageAspectFlagBits::eColor,
-+                              FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
-+        info.depth = Describe(depth.GetImage(), depth.info.pixel_format, w, h, depth.usage_flags,
-+                              vk::ImageAspectFlagBits::eDepth,
-+                              FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
-+        info.motionVectors = Describe(vk::Image(motion_image), vk::Format::eR16G16Sfloat, w, h,
-+                                      vk::ImageUsageFlagBits::eStorage |
-+                                          vk::ImageUsageFlagBits::eSampled,
-+                                      vk::ImageAspectFlagBits::eColor,
-+                                      FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
-+        info.output = Describe(vk::Image(output_image), vk::Format::eR16G16B16A16Sfloat, w, h,
-+                               vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
-+                                   vk::ImageUsageFlagBits::eTransferSrc,
-+                               vk::ImageAspectFlagBits::eColor,
-+                               FFX_VK_PORTABLE_RESOURCE_STATE_UNORDERED_ACCESS);
-+        info.exposure.structSize = sizeof(info.exposure);
-+        info.reactiveMask.structSize = sizeof(info.reactiveMask);
-+        info.transparencyAndCompositionMask.structSize =
-+            sizeof(info.transparencyAndCompositionMask);
-+        // The menu's invert-jitter option applies to FSR 3 here too (A/B of the convention).
-+        const float sign = BbToggle::Disabled(1u << 26) != BbSettings::Get().fsr4_invert_jitter.load()
-+                               ? -1.0f
-+                               : 1.0f;
-+        info.jitterOffset = {sign * jitter[0], sign * jitter[1]};
-+        info.motionVectorScale = {1.0f, 1.0f};
-+        info.renderSize = {w, h};
-+        info.outputSize = {w, h};
-+        info.frameTimeMilliseconds = frame_ms;
-+        info.preExposure = 1.0f;
-+        info.cameraNear = dc_near;
-+        info.cameraFar = 1.0e6f;
-+        info.cameraVerticalFovRadians = dc_vertical_fov;
-+        info.viewSpaceToMeters = 1.0f;
-+        info.sharpness = std::min(BbSettings::Get().sharpness.load(), 1.0f);
-+        info.enableSharpening = BbSettings::Get().sharpen ? VK_TRUE : VK_FALSE;
-+        info.reset = reset ? VK_TRUE : VK_FALSE;
-+        info.frameId = frame_id++;
-+        FfxVkPortableUpscaleCreateInfo create_info{};
-+        create_info.structSize = sizeof(create_info);
-+        create_info.flags = FFX_VK_PORTABLE_CONTEXT_HDR_COLOR_INPUT |
-+                            FFX_VK_PORTABLE_CONTEXT_AUTO_EXPOSURE |
-+                            FFX_VK_PORTABLE_CONTEXT_DEPTH_INVERTED |
-+                            FFX_VK_PORTABLE_CONTEXT_DEPTH_INFINITE;
-+        create_info.maxRenderSize = {w, h};
-+        create_info.maxOutputSize = {w, h};
-+        if (const u64 issues = ffxVkPortableValidateUpscaleDispatchInfo(&create_info, &info)) {
-+            static bool printed = false;
-+            if (!printed) {
-+                printed = true;
-+                PrintIssues("dispatch (Driveclub)", issues);
-+            }
-+            failed = true;
-+        } else if (ffxVkPortableUpscaleContextRecordDispatch(context, &info) !=
-+                   FFX_VK_PORTABLE_OK) {
-+            std::printf("Upscaler (Driveclub): FSR 3 dispatch failed\n");
-+            failed = true;
-+        } else {
-+            dispatched = true;
-+        }
++    // BB_DC_UPSCALE_SCAN=<file>: when the file appears, the draws and dispatches after the next
++    // upscaled scene's resolve, with their targets and the images they read (finding the pass
++    // that scales the scene up). The file is removed.
++    static const char* scan = std::getenv("BB_DC_UPSCALE_SCAN");
++    if (scan && upscale && !dc_scan_left && std::remove(scan) == 0) {
++        dc_scan_left = 5000;
++        std::printf("DC scan: resolve of a %ux%u scene\n", w, h);
 +    }
++    if (upscale) {
++        // The resolve passes the lit scene through (history weight 0): aliased and jittered, as
++        // the upscaler wants it at the display pass.
++        dc_late.pending = true;
++        dc_late.depth = dc_depth;
++        dc_late.jitter = jitter;
++        dc_late.frame_ms = frame_ms;
++        return true;
++    }
++    const bool dispatched =
++        DispatchDc(cmdbuf, color, color_view, depth, depth_view, w, h, w, h, frame_ms, jitter);
 +    if (!dispatched) {
 +        return false;
 +    }
@@ -14305,12 +14448,206 @@ index 7c2da3f..504e386 100644
 +    return true;
 +}
 +
++bool TemporalUpscaler::DispatchDc(vk::CommandBuffer cmdbuf, VideoCore::Image& color,
++                                  vk::ImageView color_view, VideoCore::Image& depth,
++                                  vk::ImageView depth_view, u32 w, u32 h, u32 ow, u32 oh,
++                                  float frame_ms, std::array<float, 2> frame_jitter) {
++    // How often the history restarts (it should be rare: loading, camera cuts, menu changes).
++    ++dc_dispatches;
++    dc_resets += reset ? 1u : 0u;
++    if (dc_dispatches == 1200) {
++        std::printf("Upscaler (Driveclub): %u history restarts in the last 1200 scenes\n",
++                    dc_resets);
++        dc_dispatches = dc_resets = 0;
++    }
++    // RecordFsr4 and RecordDlss take the member's jitter: the scene's here (at the display pass
++    // the next frame's is already set).
++    const auto frame_start_jitter = jitter;
++    jitter = frame_jitter;
++    bool dispatched = false;
++    if (UseFsr4()) {
++        dispatched = RecordFsr4(cmdbuf, {color.GetImage(), color_view, w, h},
++                                {depth.GetImage(), depth_view, w, h}, w, h, ow, oh, frame_ms);
++    } else if (UseDlss()) {
++        // DCport: DLAA at the scene size, DLSS above it (HDR colour with automatic exposure, as
++        // FSR 3 gets).
++        dispatched = RecordDlss(cmdbuf,
++                                {color.GetImage(), color_view, color.info.pixel_format,
++                                 vk::ImageAspectFlagBits::eColor, w, h},
++                                {depth.GetImage(), depth_view, depth.info.pixel_format,
++                                 vk::ImageAspectFlagBits::eDepth, w, h},
++                                w, h, ow, oh, frame_ms, true);
++    } else {
++        FfxVkPortableUpscaleDispatchInfo info{};
++        info.structSize = sizeof(info);
++        info.commandBuffer = cmdbuf;
++        info.color = Describe(color.GetImage(), color.info.pixel_format, w, h, color.usage_flags,
++                              vk::ImageAspectFlagBits::eColor,
++                              FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
++        info.depth = Describe(depth.GetImage(), depth.info.pixel_format, w, h, depth.usage_flags,
++                              vk::ImageAspectFlagBits::eDepth,
++                              FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
++        info.motionVectors = Describe(vk::Image(motion_image), vk::Format::eR16G16Sfloat, w, h,
++                                      vk::ImageUsageFlagBits::eStorage |
++                                          vk::ImageUsageFlagBits::eSampled,
++                                      vk::ImageAspectFlagBits::eColor,
++                                      FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
++        info.output = Describe(vk::Image(output_image), vk::Format::eR16G16B16A16Sfloat, ow, oh,
++                               vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
++                                   vk::ImageUsageFlagBits::eTransferSrc,
++                               vk::ImageAspectFlagBits::eColor,
++                               FFX_VK_PORTABLE_RESOURCE_STATE_UNORDERED_ACCESS);
++        info.exposure.structSize = sizeof(info.exposure);
++        info.reactiveMask.structSize = sizeof(info.reactiveMask);
++        info.transparencyAndCompositionMask.structSize =
++            sizeof(info.transparencyAndCompositionMask);
++        // The menu's invert-jitter option applies to FSR 3 here too (A/B of the convention).
++        const float sign = BbToggle::Disabled(1u << 26) != BbSettings::Get().fsr4_invert_jitter.load()
++                               ? -1.0f
++                               : 1.0f;
++        info.jitterOffset = {sign * jitter[0], sign * jitter[1]};
++        info.motionVectorScale = {1.0f, 1.0f};
++        info.renderSize = {w, h};
++        info.outputSize = {ow, oh};
++        info.frameTimeMilliseconds = frame_ms;
++        info.preExposure = 1.0f;
++        info.cameraNear = dc_near;
++        info.cameraFar = 1.0e6f;
++        info.cameraVerticalFovRadians = dc_vertical_fov;
++        info.viewSpaceToMeters = 1.0f;
++        info.sharpness = std::min(BbSettings::Get().sharpness.load(), 1.0f);
++        info.enableSharpening = BbSettings::Get().sharpen ? VK_TRUE : VK_FALSE;
++        info.reset = reset ? VK_TRUE : VK_FALSE;
++        info.frameId = frame_id++;
++        FfxVkPortableUpscaleCreateInfo create_info{};
++        create_info.structSize = sizeof(create_info);
++        create_info.flags = FFX_VK_PORTABLE_CONTEXT_HDR_COLOR_INPUT |
++                            FFX_VK_PORTABLE_CONTEXT_AUTO_EXPOSURE |
++                            FFX_VK_PORTABLE_CONTEXT_DEPTH_INVERTED |
++                            FFX_VK_PORTABLE_CONTEXT_DEPTH_INFINITE;
++        create_info.maxRenderSize = {w, h};
++        create_info.maxOutputSize = {ow, oh};
++        if (const u64 issues = ffxVkPortableValidateUpscaleDispatchInfo(&create_info, &info)) {
++            static bool printed = false;
++            if (!printed) {
++                printed = true;
++                PrintIssues("dispatch (Driveclub)", issues);
++            }
++            failed = true;
++        } else if (ffxVkPortableUpscaleContextRecordDispatch(context, &info) !=
++                   FFX_VK_PORTABLE_OK) {
++            std::printf("Upscaler (Driveclub): FSR 3 dispatch failed\n");
++            failed = true;
++        } else {
++            dispatched = true;
++        }
++    }
++    jitter = frame_start_jitter;
++    return dispatched;
++}
++
++bool TemporalUpscaler::DcComposites(VideoCore::ImageId image) const {
++    if (!dc_late.composite || !image) {
++        return false;
++    }
++    const auto& info = texture_cache.GetImage(image).info;
++    // The scene's picture: render size, R11G11B10 (the display pass also reads the bloom, the
++    // exposure and a scene-size RGBA8 image the tonemap compute 91642512 writes).
++    return info.size.width == dc_scene_width && info.size.height == dc_scene_height &&
++           info.pixel_format == vk::Format::eB10G11R11UfloatPack32;
++}
++
++vk::ImageView TemporalUpscaler::DcOutputView(vk::ComponentMapping mapping) {
++    for (const auto& entry : dc_output_views) {
++        if (entry.mapping == mapping) {
++            return *entry.view;
++        }
++    }
++    auto view = Check(instance.GetDevice().createImageViewUnique({
++        .image = vk::Image(output_image),
++        .viewType = vk::ImageViewType::e2D,
++        .format = vk::Format::eR16G16B16A16Sfloat,
++        .components = mapping,
++        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
++    }));
++    const vk::ImageView handle = *view;
++    dc_output_views.push_back({vk::Format::eR16G16B16A16Sfloat, mapping, std::move(view)});
++    return handle;
++}
++
++bool TemporalUpscaler::RunDcComposite(VideoCore::ImageId color_id) {
++    auto& color = texture_cache.GetImage(color_id);
++    const u32 w = color.info.size.width, h = color.info.size.height;
++    // The resolve sized the resources for this scene and the display buffer; anything else
++    // (a size change since) leaves the game's own scaling for this frame.
++    if (!resources_ready || w != width || h != height || out_width != dc_out_width ||
++        out_height != dc_out_height || !dc_late.depth || failed) {
++        reset = true;
++        return false;
++    }
++    auto& depth = texture_cache.GetImage(dc_late.depth);
++    if (depth.info.size.width != w || depth.info.size.height != h) {
++        reset = true;
++        return false;
++    }
++    const u32 ow = out_width, oh = out_height;
++    const auto color_view =
++        CachedView(color, color.info.pixel_format, vk::ImageAspectFlagBits::eColor);
++    const auto depth_view =
++        CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eDepth);
++    scheduler.EndRendering();
++    runtime.Transit(&depth, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
++                    vk::AccessFlagBits2::eShaderRead);
++    runtime.Transit(&color, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
++                    vk::AccessFlagBits2::eShaderRead);
++    runtime.FlushBarriers();
++    const auto cmdbuf = scheduler.CommandBuffer();
++    const auto all = vk::PipelineStageFlagBits2::eAllCommands;
++    const auto output_barrier = [&](vk::ImageLayout old_layout, vk::AccessFlags2 src_access,
++                                    vk::AccessFlags2 dst_access) {
++        const vk::ImageMemoryBarrier2 barrier{
++            .srcStageMask = all,
++            .srcAccessMask = src_access,
++            .dstStageMask = all,
++            .dstAccessMask = dst_access,
++            .oldLayout = old_layout,
++            .newLayout = vk::ImageLayout::eGeneral,
++            .image = vk::Image(output_image),
++            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
++        };
++        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
++    };
++    output_barrier(vk::ImageLayout::eUndefined, vk::AccessFlagBits2::eNone,
++                   vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
++    const bool dispatched = DispatchDc(cmdbuf, color, color_view, depth, depth_view, w, h, ow, oh,
++                                       dc_late.frame_ms, dc_late.jitter);
++    if (!dispatched) {
++        reset = true;
++        return false;
++    }
++    reset = false;
++    dispatched_last_frame = true;
++    ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
++    // The display pass samples it.
++    output_barrier(vk::ImageLayout::eGeneral,
++                   vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eTransferWrite,
++                   vk::AccessFlagBits2::eShaderRead);
++    static bool told = false;
++    if (!told) {
++        told = true;
++        std::printf("Upscaler (Driveclub): scene %ux%u upscaled to %ux%u where the game scales it "
++                    "into the display buffer\n",
++                    w, h, ow, oh);
++    }
++    return true;
++}
++
  } // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.h b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.h
-index 6eca99d..56ca1fd 100644
+index 6eca99d..097e12d 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.h
-@@ -70,6 +70,68 @@ public:
+@@ -70,6 +70,74 @@ public:
      /// Before a compute dispatch: the post-processing combine shader triggers the upscale.
      void OnDispatch(u64 cs_hash);
  
@@ -14365,6 +14702,12 @@ index 6eca99d..56ca1fd 100644
 +    /// the next ones are the HUD; before the first HUD draw the buffer is kept for frame
 +    /// generation (HUD-less frame).
 +    void OnDcDisplayDraw(VideoCore::ImageId display);
++    /// Before every draw (the guest address of its first color target), while Driveclub's
++    /// upscaling waits for the draw that scales the scene to the output size.
++    [[nodiscard]] bool DcLatePending() const noexcept {
++        return dc_late.pending;
++    }
++    void OnDcDraw(VAddr color_address);
 +    std::atomic<u32> fg_handed{0};     ///< inputs made (BB_FG_STATS)
 +    std::atomic<u32> display_draws{0}; ///< draws into the display buffer (BB_FG_STATS)
 +    [[nodiscard]] bool TakeFrameGenInputs(FrameGenInputs& out) {
@@ -14379,7 +14722,20 @@ index 6eca99d..56ca1fd 100644
      /// Start of a frame in the command stream (display pass).
      bool OnFrameStart();
      bool RasterScaling() const;
-@@ -148,6 +210,8 @@ private:
+@@ -116,9 +184,10 @@ public:
+     /// A sampled image replaced by the upscaled frame (the display pass).
+     bool RedirectSampled(VideoCore::ImageId image, const VideoCore::ImageViewInfo& info,
+                          vk::ImageView& view, vk::ImageLayout& layout);
+-    /// Whether RedirectSampled would replace `image` (it may record a barrier then).
++    /// Whether RedirectSampled would replace `image` (it may record a barrier or, for
++    /// Driveclub's upscaling, the upscale then).
+     [[nodiscard]] bool RedirectsSampled(VideoCore::ImageId image) const {
+-        return display_redirect && image == ui_color;
++        return (display_redirect && image == ui_color) || DcComposites(image);
+     }
+ 
+     /// Presenter: the output-size display buffer standing in for the guest one at `address`.
+@@ -148,6 +217,8 @@ private:
      void Run();
      /// The scene depth and the motion vectors for frame generation (also with the upscaler off).
      void CaptureFrameGen();
@@ -14388,7 +14744,7 @@ index 6eca99d..56ca1fd 100644
      /// The UI target before the first UI draw (frame generation's picture without UI):
      /// `color` (a texture cache image) at 1080p, the port's output-size UI image otherwise.
      void CaptureHudless(VideoCore::ImageId color);
-@@ -210,6 +274,14 @@ private:
+@@ -210,6 +281,46 @@ private:
      bool frame_gen_captured = false; ///< this frame's depth and motion are taken
      bool hudless_pending = false;    ///< the UI started; its picture is taken at its next draw
      u64 trigger_hash = 0x9a9cf8a9;
@@ -14400,10 +14756,50 @@ index 6eca99d..56ca1fd 100644
 +    vk::UniquePipelineLayout dc_motion_pipeline_layout, dc_merge_pipeline_layout;
 +    vk::UniquePipeline dc_motion_pipeline, dc_merge_pipeline;
 +    void CreateDcPipelines();
++    /// FSR 3/4 or DLSS on Driveclub's scene: `w` x `h` (jittered by `frame_jitter`) into
++    /// output_image at `ow` x `oh`. Both images in General layout.
++    bool DispatchDc(vk::CommandBuffer cmdbuf, VideoCore::Image& color, vk::ImageView color_view,
++                    VideoCore::Image& depth, vk::ImageView depth_view, u32 w, u32 h, u32 ow,
++                    u32 oh, float frame_ms, std::array<float, 2> frame_jitter);
++    // Driveclub upscaling: the engine draws its scene below the display buffer's size (the
++    // launcher's -resolutionscale). Its later passes (transparents, bloom, motion blur, depth
++    // of field) stay at the scene size and the picture reaches the output size only in the
++    // first draw into the display buffer. So the resolve takes the motion vectors and passes
++    // the scene through, and that draw samples FSR's (or DLSS's) upscale of its picture
++    // instead (RunDcComposite).
++    [[nodiscard]] bool DcUpscaling(u32 w, u32 h) const noexcept {
++        return dc_out_width && (w < dc_out_width || h < dc_out_height);
++    }
++    /// `image` is the picture the display pass of an upscaled scene samples.
++    [[nodiscard]] bool DcComposites(VideoCore::ImageId image) const;
++    bool RunDcComposite(VideoCore::ImageId color);
++    vk::ImageView DcOutputView(vk::ComponentMapping mapping);
++    u32 dc_out_width = 0, dc_out_height = 0; ///< the display buffer (output size)
++    u32 dc_scene_width = 0, dc_scene_height = 0; ///< the last resolve's scene
++    bool dc_jitter_due = false; ///< a resolve ran: the next frame start moves the jitter on
++    u32 dc_scan_left = 0;       ///< BB_DC_UPSCALE_SCAN lines left
++    u32 dc_resets = 0, dc_dispatches = 0; ///< history restarts per dispatches (log)
++    struct DcLate {
++        bool pending = false;   ///< a resolve left its scene for the draw scaling it up
++        bool composite = false; ///< inside a draw into an output-size target
++        bool done = false;      ///< RunDcComposite ran for it
++        bool ok = false;        ///< and output_image holds the upscale
++        VideoCore::ImageId depth{};
++        std::array<float, 2> jitter{};
++        float frame_ms = 16.6f;
++    } dc_late{};
      VideoCore::ImageId scene_color{};
      bool done_this_frame = false;
      u32 preset_file_frames = 0; ///< BB_PRESET_FILE polling
-@@ -271,6 +343,11 @@ private:
+@@ -252,6 +363,7 @@ private:
+     vk::ImageView Mirror(vk::Image image, std::vector<MirrorView>& views, vk::Format format,
+                          vk::ComponentMapping mapping);
+     std::vector<MirrorView> ui_views;
++    std::vector<MirrorView> dc_output_views; ///< output_image as Driveclub's display pass reads it
+     struct DisplayImage {
+         VideoCore::UniqueImage image;
+         std::vector<MirrorView> views;
+@@ -271,6 +383,11 @@ private:
      VideoCore::UniqueImage motion_image;
      VideoCore::UniqueImage output_image;
      vk::UniqueImageView motion_view;
@@ -14848,7 +15244,7 @@ index 3a73ecf..3dd7e4c 100644
      g_window_thread = std::thread([title, width, height] {
          Common::SetCurrentThreadName("bb:window");
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 651b74e..f5eb016 100644
+index 651b74e..5eeb4a9 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
 @@ -9,10 +9,12 @@
@@ -14899,7 +15295,7 @@ index 651b74e..f5eb016 100644
          for (int i = 0; i < BbSettings::UpscalerCount; ++i) {
              const bool supported = i == BbSettings::UpscalerFsr4 ? s.fsr4_supported.load()
                  : i == BbSettings::UpscalerFsr411 ? s.fsr411_supported.load()
-@@ -214,15 +227,11 @@ void Menu() {
+@@ -214,15 +227,37 @@ void Menu() {
                  ImGui::TextDisabled("- unsupported by this GPU");
              }
          }
@@ -14913,12 +15309,38 @@ index 651b74e..f5eb016 100644
          ImGui::EndCombo();
      }
 +    if (dc_menu) {
-+        ImGui::TextDisabled("FSR and DLSS work as the game's anti-aliasing at 1080p, not as an upscaler.");
++        // DCport scaling: the launcher reads it (dcport.ini preset) and starts the game with the
++        // matching -resolutionscale and scene-size patches, so a change needs a restart.
++        static const char* scalings[] = {"Native", "Quality", "Balanced", "Performance",
++                                         "Ultra Performance"};
++        static_assert(sizeof(scalings) / sizeof(*scalings) == BbSettings::PresetCount);
++        const auto scaling_label = [](int i) {
++            char label[48];
++            if (i == BbSettings::NativeAA) {
++                std::snprintf(label, sizeof(label), "%s (anti-aliasing only)", scalings[i]);
++            } else {
++                std::snprintf(label, sizeof(label), "%s (x%.1f)", scalings[i],
++                              BbSettings::PresetScale(i));
++            }
++            return std::string(label);
++        };
++        ImGui::BeginDisabled(s.upscaler == BbSettings::UpscalerOff);
++        const int preset = s.preset;
++        if (ImGui::BeginCombo("Scaling", scaling_label(preset).c_str())) {
++            for (int i = 0; i < BbSettings::PresetCount; ++i) {
++                if (ImGui::Selectable(scaling_label(i).c_str(), i == preset)) {
++                    Store(s.preset, i, true);
++                }
++            }
++            ImGui::EndCombo();
++        }
++        ImGui::EndDisabled();
++        Hint("Native: FSR or DLSS replace the game's anti-aliasing at the full render size. Quality to Ultra Performance draw the scene smaller and rebuild the full picture: more FPS, a little softer. The HUD stays sharp. A change restarts the game.");
 +    }
      if (const char* problem = s.dlss_problem.load(); problem && upscaler == BbSettings::UpscalerDlss) {
          ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "DLSS: %s", problem);
      }
-@@ -235,17 +244,22 @@ void Menu() {
+@@ -235,17 +270,22 @@ void Menu() {
      }
      if (BbSettings::IsFsr4(s.upscaler)) {
          if (s.upscaler == BbSettings::UpscalerFsr411) {
@@ -14943,7 +15365,7 @@ index 651b74e..f5eb016 100644
      ImGui::BeginDisabled(taa);
      int preset = taa ? BbSettings::NativeAA : s.preset.load();
      char preset_label[64];
-@@ -283,6 +297,7 @@ void Menu() {
+@@ -283,6 +323,7 @@ void Menu() {
      } else {
          Hint("Native AA uses the upscaler for anti-aliasing. Other presets reduce scene resolution relative to the output. The HUD is drawn at output resolution. Preset changes apply on the next frame in a live session.");
      }
@@ -14951,7 +15373,7 @@ index 651b74e..f5eb016 100644
      Checkbox("Sharpening (RCAS)", s.sharpen);
      ImGui::BeginDisabled(!s.sharpen);
      Slider("Sharpness", s.sharpness, 0.0f, 2.0f);
-@@ -305,8 +320,10 @@ void Menu() {
+@@ -305,8 +346,10 @@ void Menu() {
      }
      ImGui::EndDisabled();
      ImGui::EndDisabled();
@@ -14962,7 +15384,7 @@ index 651b74e..f5eb016 100644
      bool show_motion = s.debug_view == BbSettings::DebugMotion;
      if (ImGui::Checkbox("Show motion vectors (debug)", &show_motion)) {
          s.debug_view = show_motion ? BbSettings::DebugMotion : BbSettings::DebugNone;
-@@ -315,57 +332,88 @@ void Menu() {
+@@ -315,57 +358,88 @@ void Menu() {
      ImGui::EndDisabled(); // upscaler off
  
      ImGui::SeparatorText("Frame generation");
@@ -15096,7 +15518,7 @@ index 651b74e..f5eb016 100644
      ImGui::SeparatorText("Output resolution");
      static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160",
                                      "2560 x 1080 (21:9)", "3440 x 1440 (21:9)",
-@@ -404,6 +452,10 @@ void Menu() {
+@@ -404,6 +478,10 @@ void Menu() {
          ImGui::EndCombo();
      }
      Hint("On: output and presets change without restarting, while game post-processing stays at 1080p. Off: the scene is patched to the preset resolution at startup. Auto enables the live path on capable discrete GPUs. Changes apply after restarting the game.");
@@ -15107,7 +15529,7 @@ index 651b74e..f5eb016 100644
      ImGui::SeparatorText("Game effects (restart required)");
      static const char* lods[] = {"Highest (-2)", "Original", "Lower (1)", "Lowest (2)"};
      static constexpr int lod_values[] = {-2, 0, 1, 2};
-@@ -428,6 +480,7 @@ void Menu() {
+@@ -428,6 +506,7 @@ void Menu() {
      }
      Hint("Effects are applied through game patches at startup (patches/Bloodborne.xml). Motion blur and dynamic shadows can increase GPU load.");
      Hint("Free camera: hold Cross and press L3 (keyboard: Space + Z). Debug menu: left touchpad / Tab. Requires DbgFont14h.ccm and DbgFont14h.tpf in dvdroot_ps4/font from the debug-font mod. Right touchpad: Backspace.");
@@ -15115,15 +15537,42 @@ index 651b74e..f5eb016 100644
  
      bool restart = s.object_motion != s.startup_object_motion ||
                     s.model_lod != s.startup_model_lod || s.fov != s.startup_fov ||
-@@ -445,6 +498,7 @@ void Menu() {
+@@ -436,15 +515,33 @@ void Menu() {
+     for (int e = 0; e < BbSettings::EffectCount; ++e) {
+         restart |= s.effects[e] != s.startup_effects[e];
+     }
+-    if (restart) {
++    // DCport: the scaling the launcher started the game with (none with the upscaler off).
++    const auto dc_scaling = [](int upscaler, int preset) {
++        return upscaler == BbSettings::UpscalerOff ? int(BbSettings::NativeAA) : preset;
++    };
++    restart |= dc_menu && dc_scaling(s.upscaler, s.preset) !=
++                              dc_scaling(s.startup_upscaler, s.startup_preset);
++    // The launcher (or run.sh) passes the command that starts the game again.
++    static const bool can_restart = [] {
++        const char* command = std::getenv("BB_RESTART_COMMAND");
++        return command && command[0];
++    }();
++    if (restart && !can_restart) {
++        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
++                           "Changes will apply the next time the game starts");
++    } else if (restart) {
+         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                            "Changes will apply after restarting the game");
+         if (ImGui::Button("Apply and restart")) {
+             BbSettings::Save();
+             runtime_restart();
          }
++        if (dc_menu) {
++            Hint("The game closes and starts again at the title screen; a race in progress is lost.");
++        }
      }
  
 +    } // !no_upscaler
      ImGui::SeparatorText("Other");
      Checkbox("Show FPS counter", s.show_fps);
      Checkbox("Mute when the game is in the background", s.mute_unfocused);
-@@ -482,7 +536,7 @@ void Menu() {
+@@ -482,7 +579,7 @@ void Menu() {
          quit_armed = false;
      }
      ImGui::SameLine();
@@ -15132,7 +15581,7 @@ index 651b74e..f5eb016 100644
      ImGui::End();
      if (!keep_open) {
          SetOpen(false);
-@@ -525,13 +579,32 @@ void FpsCounter() {
+@@ -525,13 +622,32 @@ void FpsCounter() {
                       ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                       ImGuiWindowFlags_NoFocusOnAppearing);
      const auto& s = BbSettings::Get();
@@ -15172,7 +15621,7 @@ index 651b74e..f5eb016 100644
      ImGui::End();
  }
  
-@@ -548,14 +621,54 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -548,14 +664,54 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      io.IniFilename = nullptr; // window positions are not kept
      io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
      io.BackendFlags |= ImGuiBackendFlags_HasGamepad;

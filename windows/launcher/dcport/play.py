@@ -11,7 +11,7 @@ from dcport.game import has_eboot
 from dcport.ini import read_ini, update_ini
 from dcport.paths import AppPaths
 from dcport.prepare_state import is_prepared, prepare_command
-from dcport.runtime import game_command, game_env
+from dcport.runtime import game_command, game_env, session_upscale
 from dcport.settings import load_settings
 
 TITLE = "DCport"
@@ -130,7 +130,7 @@ def run(paths: AppPaths, fsr: bool, extra: list[str], *, run_process=None,
 
     _default_fps_counter(paths)
     from dcport import patches
-    error = patches.build_for_session(paths, game_dir, s)
+    error = patches.build_for_session(paths, game_dir, s, session_upscale(paths, s, fsr))
     if error:
         print(error)  # the game still starts, with the patches it had
     cmd = game_command(paths, game_dir, s.fps, extra)

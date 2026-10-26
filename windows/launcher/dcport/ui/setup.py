@@ -9,7 +9,7 @@ from dcport import fsr411, patches
 from dcport.game import game_info, ready_checks
 from dcport.prepare_state import is_prepared
 from dcport.runtime import (FPS_PRESETS, LANGUAGES, fps_note, game_language, languages_for,
-                            parse_fps, player_name)
+                            parse_fps, player_name, scaling, scaling_ini)
 from dcport.ui import theme
 
 FPS_ERROR = "Enter a whole number from 30 to 240"
@@ -19,8 +19,8 @@ UPSCALERS = (("off", "Off"), ("fsr3", "FSR 3.1"), ("fsr4", "FSR 4"), ("fsr411", 
              ("dlss", "DLSS"))
 # NVIDIA DLSS: the bridge and NVIDIA's runtime next to the game (bin/), GeForce RTX only.
 DLSS_FILES = ("dcport_dlss.dll", "nvngx_dlss.dll")
-DLSS_NOTE = ("NVIDIA DLSS: DRIVECLUB's anti-aliasing at 1080p (DLAA) on GeForce RTX cards. "
-             "If DLSS cannot start, the game uses FSR 3.1.")
+DLSS_NOTE = ("NVIDIA DLSS on GeForce RTX cards: DRIVECLUB's anti-aliasing at the render size "
+             "(DLAA), or upscaling with Scaling. If DLSS cannot start, the game uses FSR 3.1.")
 DLSS_MISSING = "DLSS needs an NVIDIA GeForce RTX card and its files in the bin folder"
 FSR411_HINT = ("FSR 4.1.1 is built once from your own amd_fidelityfx_upscaler_dx12.dll "
                "(Set up…). DCport does not include it.")
@@ -42,9 +42,15 @@ THREADING_CHOICES = (("auto", "Auto"), ("1", "On"), ("0", "Off"))
 THREADING_NOTE = ("Threading: the game's GPU work is prepared on extra threads. It gives more FPS "
                   "but can crash mid-race, so Auto keeps it off (as Off does); On turns it on. "
                   "Applies on the next PLAY.")
-AA_NOTE = ("FSR and DLSS are DRIVECLUB's anti-aliasing at 1080p (native AA), not upscalers: "
-           "the game's effects and HUD after it stay at 1080p, so there are no Quality, "
-           "Balanced or Performance modes.")
+AA_NOTE = ("FSR and DLSS replace DRIVECLUB's own anti-aliasing at the full render size "
+           "(Native). Quality to Ultra draw the game smaller and rebuild the full picture: more "
+           "FPS, a little softer. Applies on the next PLAY.")
+UPSCALE_NOTE = ("Scaling {label}: the game draws its scene at {w}x{h} and the upscaler rebuilds "
+                "it at {ow}x{oh} after the game's own effects; the HUD stays sharp. Applies on "
+                "the next PLAY.")
+# SETUP's Scaling row (patches.UPSCALES, shorter labels).
+UPSCALE_CHOICES = (("native", "Native"), ("quality", "Quality"), ("balanced", "Balanced"),
+                   ("performance", "Perf."), ("ultra_performance", "Ultra"))
 BLUR_NOTE = ("FSR and DLSS do not run with the PATCHES page's 'No motion blur or "
              "depth of field': the game's anti-aliasing is in that shader.")
 
@@ -329,10 +335,15 @@ class SetupPage(tk.Frame):
         self.upscaler_choice = theme.Segmented(grid, app, UPSCALERS, self.set_upscaler,
                                                min_label="FSR 4.1.1", pad=app.px(10))
         self.upscaler_choice.grid(row=0, column=1, sticky="w")
-        theme.text_label(grid, app, "Sharpness").grid(row=1, column=0, sticky="w",
+        theme.text_label(grid, app, "Scaling").grid(row=1, column=0, sticky="w",
+                                                    pady=(app.px(10), 0))
+        self.upscale_choice = theme.Segmented(grid, app, UPSCALE_CHOICES, self.set_upscale,
+                                              min_label="Balanced", pad=app.px(10))
+        self.upscale_choice.grid(row=1, column=1, sticky="w", pady=(app.px(10), 0))
+        theme.text_label(grid, app, "Sharpness").grid(row=2, column=0, sticky="w",
                                                       pady=(app.px(10), 0))
         row = self._row(grid)
-        row.grid(row=1, column=1, sticky="we", pady=(app.px(10), 0))
+        row.grid(row=2, column=1, sticky="we", pady=(app.px(10), 0))
         self.sharpness_value = theme.text_label(row, app, "0.30", font="body_bold", width=4,
                                                 anchor="e")
         self.sharpness_value.pack(side="right")
@@ -340,11 +351,11 @@ class SetupPage(tk.Frame):
                                       on_change=self._sharpness_moved,
                                       on_commit=self.set_sharpness)
         self.sharpness.pack(side="left", fill="x", expand=True, padx=(0, app.px(10)))
-        theme.text_label(grid, app, "Frame gen.").grid(row=2, column=0, sticky="w",
+        theme.text_label(grid, app, "Frame gen.").grid(row=3, column=0, sticky="w",
                                                        pady=(app.px(10), 0))
         self.frame_gen_choice = theme.Segmented(grid, app, FRAME_GEN_CHOICES, self.set_frame_gen,
                                                 min_label="FSR 4.1.1", pad=app.px(10))
-        self.frame_gen_choice.grid(row=2, column=1, sticky="w", pady=(app.px(10), 0))
+        self.frame_gen_choice.grid(row=3, column=1, sticky="w", pady=(app.px(10), 0))
         self.frame_gen_note = theme.text_label(card, app, FRAME_GEN_NOTE, font="small",
                                                fg="muted")
         self._wrapping(self.frame_gen_note, card).pack(fill="x", pady=(app.px(12), 0))
@@ -665,8 +676,22 @@ class SetupPage(tk.Frame):
         blur = current != "off" and patches.MOTION_BLUR in self.app.settings.patches
         if blur and not note:
             note, role = BLUR_NOTE, "warn"
+        s = self.app.settings
+        upscale = scaling(self.app.paths, s)
+        if not any(upscale == k for k, _ in UPSCALE_CHOICES):
+            upscale = patches.DEFAULT_UPSCALE
+        self.upscale_choice.set(upscale)
+        for value, _ in UPSCALE_CHOICES:  # Off keeps the game's own anti-aliasing, unscaled
+            self.upscale_choice.set_enabled(value, current != "off")
         if current != "off" and not note:
-            note = AA_NOTE
+            factor = patches.upscale_factor(upscale)
+            if factor == 1.0:
+                note = AA_NOTE
+            else:
+                w, h = patches.scene_size(s, factor)
+                ow, oh = patches.display(s).size
+                note = UPSCALE_NOTE.format(label=dict(UPSCALE_CHOICES)[upscale], w=w, h=h,
+                                           ow=ow, oh=oh)
         self.upscaler_note.configure(text=note, fg=self.app.palette[role])
         self._pack_if(self.upscaler_note, bool(note), pady=(self.app.px(12), 0))
         try:
@@ -784,6 +809,13 @@ class SetupPage(tk.Frame):
     def set_upscaler(self, value: str) -> None:
         # DCport runs DRIVECLUB's upscalers without subpixel jitter: it goes with every change
         self._show_status(self.app.update_game_ini({"upscaler": value, "jitter": "0"}) or "")
+        self._refresh_upscaling()
+
+    def set_upscale(self, value: str) -> None:
+        # dcport.ini preset, shared with the in-game menu (dcport.runtime.scaling)
+        self.app.settings.upscale = value
+        self._saved(self.app.save_settings())
+        self._show_status(self.app.update_game_ini(scaling_ini(value)) or "")
         self._refresh_upscaling()
 
     def set_frame_gen(self, value: str) -> None:

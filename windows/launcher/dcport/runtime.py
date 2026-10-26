@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dcport.ini import read_ini
 from dcport.paths import AppPaths
-from dcport.patches import dmem_mb, game_args, window
+from dcport.patches import UPSCALES, dmem_mb, game_args, upscale_factor, window
 from dcport.settings import LauncherSettings
 
 FPS_PRESETS = (30, 60, 75, 90, 120, 144)
@@ -93,6 +93,31 @@ def game_command(paths: AppPaths, game_dir: Path, fps: int,
     return cmd
 
 
+def scaling(paths: AppPaths, s: LauncherSettings) -> str:
+    """SETUP's Scaling (an UPSCALES key): dcport.ini preset, the runtime's preset number in
+    UPSCALES order, which the in-game menu changes too; the launcher's own setting when the
+    file has none."""
+    value = _ini_value(paths, "preset", "")
+    if value.isascii() and value.isdigit() and int(value) < len(UPSCALES):
+        return UPSCALES[int(value)][0]
+    return s.upscale
+
+
+def scaling_ini(key: str) -> dict[str, str]:
+    """The dcport.ini line for an UPSCALES key (Native for an unknown one)."""
+    keys = [k for k, _, _ in UPSCALES]
+    return {"preset": str(keys.index(key) if key in keys else 0)}
+
+
+def session_upscale(paths: AppPaths, s: LauncherSettings, fsr: bool) -> float:
+    """Output size over scene size for the session: SETUP's Upscaling, only in the FSR edition
+    with FSR or DLSS on (dcport.ini upscaler, FSR 3.1 when missing, as in the runtime). Off
+    keeps the game's own anti-aliasing, which would only stretch a smaller picture."""
+    if not fsr or _ini_value(paths, "upscaler", "fsr3") == "off":
+        return 1.0
+    return upscale_factor(scaling(paths, s))
+
+
 def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
              base: Mapping[str, str]) -> dict[str, str]:
     env = dict(base)
@@ -117,7 +142,7 @@ def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
     if readbacks in ("1", "2"):
         env["BB_READBACKS"] = "2"
     env.pop("DC_GAME_ARGS", None)
-    if args := game_args(s):
+    if args := game_args(s, session_upscale(paths, s, fsr)):
         env["DC_GAME_ARGS"] = args
     # dcport.ini threaded_recording=0/1 (SETUP > Threading); Auto (anything else) lets the
     # runtime decide: off (it can crash mid-race).
@@ -131,6 +156,13 @@ def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
     else:
         env["BB_VBLANK_HZ"] = str(s.fps)
         env["BB_FPS_LIMIT"] = str(s.fps)
+    # The in-game menu's "Apply and restart" (a new Scaling is a -resolutionscale and patches
+    # at start): the game starts the launcher's --play again, which builds them anew.
+    launcher = paths.root / "DriveClub.exe"
+    if launcher.is_file():
+        env["BB_RESTART_COMMAND"] = f'"{launcher}" --play'
+    else:
+        env.pop("BB_RESTART_COMMAND", None)
     if fsr:
         env.pop("BB_UPSCALER", None)
         env["BB_DC_UPSCALE"] = "1"

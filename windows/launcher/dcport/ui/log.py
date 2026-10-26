@@ -7,6 +7,7 @@ import tkinter as tk
 from pathlib import Path
 
 from dcport import __version__
+from dcport.runtime import scaling
 from dcport.ui import theme
 
 TAIL_LINES = 6000
@@ -218,6 +219,7 @@ class LogPage(tk.Frame):
         if app.fsr:
             ini = app.game_ini()
             lines.append(f"Upscaler: {ini.get('upscaler', 'fsr3')}, "
+                         f"scaling {scaling(app.paths, s)}, "
                          f"sharpness {ini.get('sharpness', '0.30')}")
         lines.append(f"Windows: {platform.version()}")
         try:

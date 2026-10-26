@@ -22,6 +22,7 @@ class LauncherSettings:
     window_size: str = "1920x1080"  # windowed mode only
     aspect: str = "16:9"  # dcport.patches.ASPECTS
     fov: float = 0.65625  # wide aspects only (dcport.patches.DEFAULT_FOV)
+    upscale: str = "native"  # dcport.patches.UPSCALES; only with FSR or DLSS on
     patches: list = field(default_factory=list)  # names of dcport.patches.TOGGLES
     patch_timing: str = "deltatime"  # dcport.patches.TIMING
 
