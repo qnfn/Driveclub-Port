@@ -4120,10 +4120,10 @@ index e5e14b1..79439cd 100644
          cmdbuf.endDebugUtilsLabelEXT();
      }
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-index 2bf5a5d..98a220d 100644
+index 2bf5a5d..be897fb 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-@@ -1,3734 +1,4542 @@
+@@ -1,3734 +1,4663 @@
 -// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 -// SPDX-License-Identifier: GPL-2.0-or-later
 -
@@ -7866,6 +7866,7 @@ index 2bf5a5d..98a220d 100644
 +#include <unordered_map>
 +#include <unordered_set>
 +#include <set>
++#include <tuple>
 +#include "video_core/renderer_vulkan/ui_composition.h"
 +#include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 +#include "bbport_settings.h"
@@ -7893,6 +7894,8 @@ index 2bf5a5d..98a220d 100644
 +#include "video_core/renderer_vulkan/vk_shader_hle.h"
 +#include "video_core/texture_cache/image_view.h"
 +#include "video_core/texture_cache/texture_cache.h"
++
++#include <vk_mem_alloc.h>
 +
 +namespace Vulkan {
 +
@@ -10866,6 +10869,117 @@ index 2bf5a5d..98a220d 100644
 +    return entry;
 +}
 +
++// DCport: BB_DC_TEX_DUMP=<folder>: each texture sampled by a draw into the display buffer (or
++// by a UI shader) is written there once as a DDS file (mip 0, layer 0), and the log names the
++// shader that used it. A debugging aid to find the game's button symbols; the files stay on
++// the player's PC.
++struct DcDumpFormat {
++    vk::Format format;
++    u32 dxgi;
++    u32 block;  // bytes per 4x4 block, or 0 for an uncompressed format
++    u32 texel;  // bytes per texel of an uncompressed format
++};
++constexpr std::array<DcDumpFormat, 22> DcDumpFormats = {{
++    {vk::Format::eR8G8B8A8Unorm, 28, 0, 4},       {vk::Format::eR8G8B8A8Srgb, 29, 0, 4},
++    {vk::Format::eB8G8R8A8Unorm, 87, 0, 4},       {vk::Format::eB8G8R8A8Srgb, 91, 0, 4},
++    {vk::Format::eA2B10G10R10UnormPack32, 24, 0, 4}, {vk::Format::eR8Unorm, 61, 0, 1},
++    {vk::Format::eR8G8Unorm, 49, 0, 2},           {vk::Format::eR16G16B16A16Sfloat, 10, 0, 8},
++    {vk::Format::eBc1RgbaUnormBlock, 71, 8, 0},   {vk::Format::eBc1RgbaSrgbBlock, 72, 8, 0},
++    {vk::Format::eBc1RgbUnormBlock, 71, 8, 0},    {vk::Format::eBc1RgbSrgbBlock, 72, 8, 0},
++    {vk::Format::eBc2UnormBlock, 74, 16, 0},      {vk::Format::eBc2SrgbBlock, 75, 16, 0},
++    {vk::Format::eBc3UnormBlock, 77, 16, 0},      {vk::Format::eBc3SrgbBlock, 78, 16, 0},
++    {vk::Format::eBc4UnormBlock, 80, 8, 0},       {vk::Format::eBc4SnormBlock, 81, 8, 0},
++    {vk::Format::eBc5UnormBlock, 83, 16, 0},      {vk::Format::eBc5SnormBlock, 84, 16, 0},
++    {vk::Format::eBc7UnormBlock, 98, 16, 0},      {vk::Format::eBc7SrgbBlock, 99, 16, 0},
++}};
++
++static void DcTexDump(const Instance& instance, Scheduler& scheduler, Runtime& runtime,
++                      VideoCore::Image& image, u64 shader) {
++    static const char* dir = std::getenv("BB_DC_TEX_DUMP");
++    const auto& info = image.info;
++    const u32 w = info.size.width;
++    const u32 h = info.size.height;
++    if (!dir || !*dir || info.num_samples > 1 || info.props.is_depth || w == 0 || h == 0 ||
++        w > 8192 || h > 8192) {
++        return;
++    }
++    static std::mutex mutex;
++    static std::set<std::tuple<VAddr, u32, u32, u32>> seen;
++    {
++        std::scoped_lock lock{mutex};
++        if (seen.size() >= 4000 ||
++            !seen.emplace(info.guest_address, w, h, u32(info.pixel_format)).second) {
++            return;
++        }
++    }
++    const auto fmt = std::find_if(DcDumpFormats.begin(), DcDumpFormats.end(),
++                                  [&](const auto& f) { return f.format == info.pixel_format; });
++    if (fmt == DcDumpFormats.end()) {
++        std::printf("Texture dump: skipped %#llx %ux%u %s (shader %08llx): format not saved\n",
++                    (unsigned long long)info.guest_address, w, h,
++                    vk::to_string(info.pixel_format).c_str(), (unsigned long long)shader);
++        return;
++    }
++    const u32 pitch = fmt->block ? (w + 3) / 4 * fmt->block : w * fmt->texel;
++    const u32 rows = fmt->block ? (h + 3) / 4 : h;
++    const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
++                                       .size = VkDeviceSize(pitch) * rows,
++                                       .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
++    const VmaAllocationCreateInfo alloc_ci{
++        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
++        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
++    VkBuffer buffer{};
++    VmaAllocation allocation{};
++    VmaAllocationInfo alloc_info{};
++    if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer, &allocation,
++                        &alloc_info) != VK_SUCCESS) {
++        return;
++    }
++    scheduler.EndRendering();
++    runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
++                    vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
++    runtime.FlushBarriers();
++    scheduler.Record([src = image.GetImage(), dst = vk::Buffer{buffer}, w, h](
++                         vk::CommandBuffer cmdbuf) {
++        cmdbuf.copyImageToBuffer(
++            src, vk::ImageLayout::eTransferSrcOptimal, dst,
++            vk::BufferImageCopy{.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
++                                .imageExtent = {w, h, 1}});
++    });
++    char path[600];
++    std::snprintf(path, sizeof(path), "%s/tex_%010llx_%ux%u_%s_%08llx.dds", dir,
++                  (unsigned long long)info.guest_address, w, h,
++                  vk::to_string(info.pixel_format).c_str(), (unsigned long long)shader);
++    std::printf("Texture dump: %s\n", path);
++    // DDS with the DX10 header: magic, the 124-byte header, then the 20-byte DX10 header.
++    std::array<u32, 1 + 31 + 5> header{};
++    header[0] = 0x20534444;                  // "DDS "
++    header[1] = 124;                         // size
++    header[2] = 0x1 | 0x2 | 0x4 | 0x1000 | (fmt->block ? 0x80000 : 0x8);
++    header[3] = h;
++    header[4] = w;
++    header[5] = fmt->block ? pitch * rows : pitch;
++    header[7] = 1;                           // mip count
++    header[19] = 32;                         // pixel format: size
++    header[20] = 0x4;                        // FOURCC
++    header[21] = 0x30315844;                 // "DX10"
++    header[27] = 0x1000;                     // caps: texture
++    header[32] = fmt->dxgi;
++    header[33] = 3;                          // TEXTURE2D
++    header[35] = 1;                          // array size
++    scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation,
++                                      alloc_info, size = buffer_ci.size, header,
++                                      file = std::string{path}] {
++        vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
++        if (FILE* f = std::fopen(file.c_str(), "wb")) {
++            std::fwrite(header.data(), sizeof(u32), header.size(), f);
++            std::fwrite(alloc_info.pMappedData, 1, size, f);
++            std::fclose(f);
++        }
++        vmaDestroyBuffer(allocator, buffer, allocation);
++    });
++}
++
 +void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* prepared,
 +                              Shader::Backend::Bindings& binding, u32& write_index,
 +                              bool& barrier, bool on_helper) {
@@ -11069,6 +11183,13 @@ index 2bf5a5d..98a220d 100644
 +            auto& image_view = texture_cache.FindTexture(
 +                image_id, desc, memo_entry ? &memo_entry->view_memo : nullptr, !on_helper);
 +            const auto binding = image.binding;
++            static const bool tex_dump = std::getenv("BB_DC_TEX_DUMP") != nullptr;
++            if (tex_dump && !on_helper && !is_storage && !binding.is_target &&
++                (DcUiShaderFits(stage.pgm_hash) ||
++                 (Regs().color_buffers[0] &&
++                  FrameCapture::IsDisplayBuffer(Regs().color_buffers[0].Address())))) {
++                DcTexDump(instance, scheduler, runtime, image, stage.pgm_hash);
++            }
 +
 +            // bbport: a proxied scene image sampled with normalized coordinates reads the proxy:
 +            // no resample to the native size (the native image is not touched).
@@ -15244,7 +15365,7 @@ index 3a73ecf..3dd7e4c 100644
      g_window_thread = std::thread([title, width, height] {
          Common::SetCurrentThreadName("bb:window");
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 651b74e..5eeb4a9 100644
+index 651b74e..f66ce6d 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
 @@ -9,10 +9,12 @@
@@ -15572,7 +15693,36 @@ index 651b74e..5eeb4a9 100644
      ImGui::SeparatorText("Other");
      Checkbox("Show FPS counter", s.show_fps);
      Checkbox("Mute when the game is in the background", s.mute_unfocused);
-@@ -482,7 +579,7 @@ void Menu() {
+@@ -457,7 +554,27 @@ void Menu() {
+         }
+         ImGui::EndCombo();
+     }
+-    Hint("The game's button icons: keyboard and mouse keys from input.ini while you play with them, the controller's (PlayStation, Xbox or Switch) while you use it.");
++    if (dc_menu) {
++        // DCport: the look of Driveclub's controller prompts (bbport_prompts.cpp).
++        static const char* xbox_looks[] = {"Xbox 360", "Xbox One"};
++        static const char* ps_looks[] = {"PS4 (the game's own)", "PS5"};
++        int xbox = s.xbox_buttons, ps = s.playstation_buttons;
++        if (ImGui::BeginCombo("Xbox buttons", xbox_looks[xbox])) {
++            for (int i = 0; i < 2; ++i) {
++                if (ImGui::Selectable(xbox_looks[i], i == xbox)) Store(s.xbox_buttons, i, true);
++            }
++            ImGui::EndCombo();
++        }
++        if (ImGui::BeginCombo("PlayStation buttons", ps_looks[ps])) {
++            for (int i = 0; i < 2; ++i) {
++                if (ImGui::Selectable(ps_looks[i], i == ps)) Store(s.playstation_buttons, i, true);
++            }
++            ImGui::EndCombo();
++        }
++        Hint("The game's button icons follow the controller in use, in the look chosen here; on keyboard and mouse they stay the game's own.");
++    } else {
++        Hint("The game's button icons: keyboard and mouse keys from input.ini while you play with them, the controller's (PlayStation, Xbox or Switch) while you use it.");
++    }
+ 
+     ImGui::Spacing();
+     if (ImGui::Button("Close")) {
+@@ -482,7 +599,7 @@ void Menu() {
          quit_armed = false;
      }
      ImGui::SameLine();
@@ -15581,7 +15731,7 @@ index 651b74e..5eeb4a9 100644
      ImGui::End();
      if (!keep_open) {
          SetOpen(false);
-@@ -525,13 +622,32 @@ void FpsCounter() {
+@@ -525,13 +642,32 @@ void FpsCounter() {
                       ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                       ImGuiWindowFlags_NoFocusOnAppearing);
      const auto& s = BbSettings::Get();
@@ -15621,7 +15771,7 @@ index 651b74e..5eeb4a9 100644
      ImGui::End();
  }
  
-@@ -548,14 +664,54 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -548,14 +684,54 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      io.IniFilename = nullptr; // window positions are not kept
      io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
      io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -15678,8 +15828,537 @@ index 651b74e..5eeb4a9 100644
  
      ImFontConfig font_config;
      font_config.FontDataOwnedByAtlas = false;
+diff --git a/gpu/shim/bbport_prompt_icons.cpp b/gpu/shim/bbport_prompt_icons.cpp
+index c729033..69a1cef 100644
+--- a/gpu/shim/bbport_prompt_icons.cpp
++++ b/gpu/shim/bbport_prompt_icons.cpp
+@@ -588,4 +588,324 @@ std::vector<uint8_t> RenderIconArea(const Pixels& icon, const Area& area) {
+     return blocks;
+ }
+ 
++// ---- DCport: DriveClub ------------------------------------------------------------------
++
++// Game 01.28's icons (XXH3-64 of their bytes as uploaded), drawn by its UI shader 78662cab.
++const DcTexture DcTextures[DcCount] = {
++    {48, 48, 0x872a38568cb133aaull}, {48, 48, 0x94c0f879fb7256f0ull},  // Cross, Circle
++    {48, 48, 0x10a1daf3d6d40845ull}, {48, 48, 0x873e231359caf350ull},  // Square, Triangle
++    {96, 64, 0xee97006c63c8f8faull}, {96, 64, 0xc56ebd9687793251ull},  // L1, R1
++    {96, 64, 0x2f29adad6ad4619bull}, {96, 64, 0x67231b610e560314ull},  // L2, R2
++    {48, 48, 0x5119d6588cf11699ull}, {48, 48, 0xef6600478effaec3ull},  // L3, R3
++    {64, 48, 0x5b2c8585b107cfd7ull}, {64, 32, 0xd183c56f7bccc398ull},  // touchpad (two sizes)
++};
++
++size_t DcBytes(DcIcon icon) {
++    const auto& t = DcTextures[icon];
++    return size_t((t.width + 31) / 32 * 8) * ((t.height + 31) / 32 * 8) * 16;
++}
++
++namespace {
++
++/// A canvas of any size, premultiplied, for the DriveClub icons.
++struct DcCanvas {
++    int w, h;
++    std::vector<std::array<float, 4>> px;
++    DcCanvas(int width, int height) : w(width), h(height), px(size_t(width) * height) {}
++    void Blend(int x, int y, Color c, float coverage) {
++        if (x < 0 || y < 0 || x >= w || y >= h || coverage <= 0.0f) return;
++        const float a = c.a / 255.0f * std::min(coverage, 1.0f);
++        auto& p = px[size_t(y) * w + x];
++        p[0] = c.r * a + p[0] * (1 - a);
++        p[1] = c.g * a + p[1] * (1 - a);
++        p[2] = c.b * a + p[2] * (1 - a);
++        p[3] = 255.0f * a + p[3] * (1 - a);
++    }
++};
++
++Color Mix(Color a, Color b, float t) {
++    t = std::clamp(t, 0.0f, 1.0f);
++    return {a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
++}
++
++/// Fills a shape given by `inside(px, py)` (4x4 samples per pixel), coloured top to bottom
++/// from `top` to `bottom` over [y0, y1].
++template <typename Inside>
++void Fill(DcCanvas& c, float y0, float y1, Color top, Color bottom, Inside inside) {
++    for (int y = 0; y < c.h; ++y) {
++        const Color color = Mix(top, bottom, (y + 0.5f - y0) / std::max(1.0f, y1 - y0));
++        for (int x = 0; x < c.w; ++x) {
++            int n = 0;
++            for (int sy = 0; sy < 4; ++sy) {
++                for (int sx = 0; sx < 4; ++sx) n += inside(x + (sx + 0.5f) / 4, y + (sy + 0.5f) / 4);
++            }
++            c.Blend(x, y, color, n / 16.0f);
++        }
++    }
++}
++
++void Disc(DcCanvas& c, float cx, float cy, float r, Color top, Color bottom) {
++    Fill(c, cy - r, cy + r, top, bottom,
++         [=](float px, float py) { return (px - cx) * (px - cx) + (py - cy) * (py - cy) <= r * r; });
++}
++
++/// Rounded rectangle; `r_top` and `r_bottom` are the corner radii of each edge.
++void Rounded(DcCanvas& c, float x0, float y0, float x1, float y1, float r_top, float r_bottom, Color top,
++             Color bottom) {
++    Fill(c, y0, y1, top, bottom, [=](float px, float py) {
++        if (px < x0 || px >= x1 || py < y0 || py >= y1) return false;
++        const float r = py < (y0 + y1) / 2 ? r_top : r_bottom;
++        const float cx = std::clamp(px, x0 + r, x1 - r), cy = std::clamp(py, y0 + r, y1 - r);
++        return (px - cx) * (px - cx) + (py - cy) * (py - cy) <= r * r;
++    });
++}
++
++/// Bold text centred on (cx, cy) at `size` pixels (smaller if wider than `max_width`), with a
++/// dark outline when `outline` is set.
++void DcText(DcCanvas& c, const std::string& text, float cx, float cy, float size, float max_width, Color color,
++            bool outline) {
++    if (!g_font_ready || text.empty()) return;
++    const auto cps = Codepoints(text);
++    while (size > 6 && TextWidth(cps, stbtt_ScaleForPixelHeight(&g_font, size)) > max_width) size -= 0.5f;
++    const float scale = stbtt_ScaleForPixelHeight(&g_font, size);
++    int ascent, descent, gap;
++    stbtt_GetFontVMetrics(&g_font, &ascent, &descent, &gap);
++    const float baseline = cy + ascent * scale * 0.73f / 2;
++    const auto draw = [&](float dx, float dy, Color ink) {
++        float x = cx - TextWidth(cps, scale) / 2 + dx;
++        for (size_t i = 0; i < cps.size(); ++i) {
++            int w, h, xoff, yoff;
++            unsigned char* bitmap = stbtt_GetCodepointBitmapSubpixel(&g_font, scale, scale, x - std::floor(x), 0,
++                                                                    cps[i], &w, &h, &xoff, &yoff);
++            for (int by = 0; by < h; ++by) {
++                for (int bx = 0; bx < w; ++bx) {
++                    c.Blend(int(std::floor(x)) + xoff + bx, int(std::round(baseline + dy)) + yoff + by, ink,
++                            bitmap[by * w + bx] / 255.0f);
++                }
++            }
++            stbtt_FreeBitmap(bitmap, nullptr);
++            int advance, lsb;
++            stbtt_GetCodepointHMetrics(&g_font, cps[i], &advance, &lsb);
++            x += advance * scale;
++            if (i + 1 < cps.size()) x += stbtt_GetCodepointKernAdvance(&g_font, cps[i], cps[i + 1]) * scale;
++        }
++    };
++    if (outline) {
++        const Color dark{20, 20, 20, 200};
++        for (const float o : {-1.2f, 1.2f}) {
++            draw(o, 0, dark);
++            draw(0, o, dark);
++            draw(o * 0.7f, o * 0.7f, dark);
++            draw(o * 0.7f, -o * 0.7f, dark);
++        }
++    }
++    for (const float bold : {-0.35f, 0.0f, 0.35f}) draw(bold, 0, color);
++}
++
++constexpr Color kWhite{255, 255, 255, 255};
++constexpr Color kInk{34, 34, 38, 255};
++
++/// The Xbox 360's glossy face buttons: the colour darker at the bottom, a dark rim, a soft
++/// highlight in the top half and a white letter.
++void Gem(DcCanvas& c, const char* letter, Color light, Color dark) {
++    const float cx = c.w / 2.0f, cy = c.h / 2.0f, r = c.w * 0.46f;
++    Disc(c, cx, cy, r, {28, 28, 30, 255}, {12, 12, 14, 255});
++    Disc(c, cx, cy, r - 2.2f, light, dark);
++    Fill(c, cy - r, cy, {255, 255, 255, 120}, {255, 255, 255, 10}, [=](float px, float py) {
++        const float ex = (px - cx) / (r * 0.72f), ey = (py - (cy - r * 0.42f)) / (r * 0.46f);
++        return ex * ex + ey * ey <= 1.0f;
++    });
++    // White on the colour only: a dark outline would put three colours in the letter's blocks,
++    // more than one BC7 colour line keeps.
++    DcText(c, letter, cx, cy + 0.5f, c.h * 0.56f, c.w * 0.6f, kWhite, false);
++}
++
++/// A bumper (LB, RB): a silver bar with dark letters; a trigger (LT, RT): taller and rounded on
++/// top. Both keep the game's icon size and leave its edges transparent.
++void Shoulder360(DcCanvas& c, const char* name, bool trigger) {
++    const float x0 = 6, x1 = c.w - 6.0f;
++    const float y0 = trigger ? 6.0f : 14.0f, y1 = c.h - (trigger ? 6.0f : 14.0f);
++    const float r_top = trigger ? (y1 - y0) * 0.45f : (y1 - y0) * 0.38f, r_bottom = trigger ? 5.0f : (y1 - y0) * 0.38f;
++    Rounded(c, x0, y0, x1, y1, r_top, r_bottom, {70, 70, 74, 255}, {40, 40, 44, 255});
++    Rounded(c, x0 + 2, y0 + 2, x1 - 2, y1 - 2, r_top - 2, r_bottom - 2, {238, 238, 240, 255}, {168, 170, 176, 255});
++    DcText(c, name, c.w / 2.0f, (y0 + y1) / 2 + 1, (y1 - y0) * 0.62f, (x1 - x0) * 0.8f, kInk, false);
++}
++
++/// A stick pressed (L3, R3): the dark stick top with a lighter ring and its name.
++void Stick360(DcCanvas& c, const char* name) {
++    const float cx = c.w / 2.0f, cy = c.h / 2.0f, r = c.w * 0.46f;
++    Disc(c, cx, cy, r, {28, 28, 30, 255}, {12, 12, 14, 255});
++    Disc(c, cx, cy, r - 2.2f, {98, 98, 104, 255}, {52, 52, 56, 255});
++    Disc(c, cx, cy, r - 6.5f, {58, 58, 62, 255}, {78, 78, 84, 255});
++    DcText(c, name, cx, cy + 0.5f, c.h * 0.38f, r * 1.5f, kWhite, true);
++}
++
++/// A thick line from (x0, y0) to (x1, y1) with round ends.
++void Segment(DcCanvas& c, float x0, float y0, float x1, float y1, float width, Color color) {
++    Fill(c, 0, float(c.h), color, color, [=](float px, float py) {
++        const float dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy;
++        const float t = len2 > 0 ? std::clamp(((px - x0) * dx + (py - y0) * dy) / len2, 0.0f, 1.0f) : 0;
++        const float qx = x0 + t * dx - px, qy = y0 + t * dy - py;
++        return qx * qx + qy * qy <= width * width / 4;
++    });
++}
++
++void Ring(DcCanvas& c, float cx, float cy, float r, float width, Color color) {
++    Fill(c, 0, float(c.h), color, color, [=](float px, float py) {
++        const float d = std::sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
++        return std::abs(d - r) <= width / 2;
++    });
++}
++
++/// The dark round button the Xbox One and DualSense prompts sit on.
++void DarkButton(DcCanvas& c) {
++    const float cx = c.w / 2.0f, cy = c.h / 2.0f, r = c.w * 0.46f;
++    Disc(c, cx, cy, r, {92, 92, 98, 255}, {54, 54, 60, 255});
++    Disc(c, cx, cy, r - 1.8f, {40, 40, 44, 255}, {20, 20, 22, 255});
++}
++
++/// Xbox One: the letter in the button's colour on the dark button.
++void FlatFace(DcCanvas& c, const char* letter, Color color) {
++    DarkButton(c);
++    DcText(c, letter, c.w / 2.0f, c.h / 2.0f + 0.5f, c.h * 0.56f, c.w * 0.6f, color, false);
++}
++
++/// A dark bumper or trigger with its name in white (Xbox One, DualSense).
++void DarkShoulder(DcCanvas& c, const char* name, bool trigger) {
++    const float x0 = 6, x1 = c.w - 6.0f;
++    const float y0 = trigger ? 6.0f : 14.0f, y1 = c.h - (trigger ? 6.0f : 14.0f);
++    const float r_top = trigger ? (y1 - y0) * 0.45f : (y1 - y0) * 0.38f, r_bottom = trigger ? 5.0f : (y1 - y0) * 0.38f;
++    Rounded(c, x0, y0, x1, y1, r_top, r_bottom, {92, 92, 98, 255}, {54, 54, 60, 255});
++    Rounded(c, x0 + 1.8f, y0 + 1.8f, x1 - 1.8f, y1 - 1.8f, r_top - 1.8f, r_bottom - 1.8f, {40, 40, 44, 255},
++            {20, 20, 22, 255});
++    DcText(c, name, c.w / 2.0f, (y0 + y1) / 2 + 1, (y1 - y0) * 0.62f, (x1 - x0) * 0.8f, kWhite, false);
++}
++
++/// A dark stick top with its name in white (Xbox One, DualSense).
++void DarkStick(DcCanvas& c, const char* name) {
++    DarkButton(c);
++    Ring(c, c.w / 2.0f, c.h / 2.0f, c.w * 0.3f, 1.6f, {110, 110, 116, 255});
++    DcText(c, name, c.w / 2.0f, c.h / 2.0f + 0.5f, c.h * 0.36f, c.w * 0.5f, kWhite, false);
++}
++
++/// Xbox One's View button: two overlapping windows on the dark button.
++void View(DcCanvas& c) {
++    const float s = std::min(c.w, c.h) * 0.92f, cx = c.w / 2.0f, cy = c.h / 2.0f;
++    Disc(c, cx, cy, s / 2, {92, 92, 98, 255}, {54, 54, 60, 255});
++    Disc(c, cx, cy, s / 2 - 1.8f, {40, 40, 44, 255}, {20, 20, 22, 255});
++    const float u = s / 32;  // the icon drawn on a 32-unit grid
++    const Color line = kWhite, back{40, 40, 44, 255};
++    Rounded(c, cx - 4 * u, cy - 7 * u, cx + 7 * u, cy + 2 * u, 1.2f * u, 1.2f * u, line, line);
++    Rounded(c, cx - 2.4f * u, cy - 5.4f * u, cx + 5.4f * u, cy + 0.4f * u, 0.5f * u, 0.5f * u, back, back);
++    Rounded(c, cx - 7 * u, cy - 2 * u, cx + 4 * u, cy + 7 * u, 1.2f * u, 1.2f * u, line, line);
++    Rounded(c, cx - 5.4f * u, cy - 0.4f * u, cx + 2.4f * u, cy + 5.4f * u, 0.5f * u, 0.5f * u, back, back);
++}
++
++/// DualSense-style symbols: light outlines on the dark button.
++void PsFace(DcCanvas& c, DcIcon icon) {
++    DarkButton(c);
++    const float cx = c.w / 2.0f, cy = c.h / 2.0f, k = c.w / 48.0f, wdt = 3.4f * k;
++    const Color ink{232, 232, 236, 255};
++    switch (icon) {
++    case DcCross:
++        Segment(c, cx - 9 * k, cy - 9 * k, cx + 9 * k, cy + 9 * k, wdt, ink);
++        Segment(c, cx - 9 * k, cy + 9 * k, cx + 9 * k, cy - 9 * k, wdt, ink);
++        break;
++    case DcCircle: Ring(c, cx, cy, 9.5f * k, wdt, ink); break;
++    case DcSquare:
++        Segment(c, cx - 9 * k, cy - 9 * k, cx + 9 * k, cy - 9 * k, wdt, ink);
++        Segment(c, cx + 9 * k, cy - 9 * k, cx + 9 * k, cy + 9 * k, wdt, ink);
++        Segment(c, cx + 9 * k, cy + 9 * k, cx - 9 * k, cy + 9 * k, wdt, ink);
++        Segment(c, cx - 9 * k, cy + 9 * k, cx - 9 * k, cy - 9 * k, wdt, ink);
++        break;
++    default: {  // triangle
++        const float top = cy - 10.5f * k, base = cy + 7.5f * k, half = 10.5f * k;
++        Segment(c, cx, top, cx + half, base, wdt, ink);
++        Segment(c, cx + half, base, cx - half, base, wdt, ink);
++        Segment(c, cx - half, base, cx, top, wdt, ink);
++        break;
++    }
++    }
++}
++
++/// The DualSense touchpad: a wide dark pad with a light outline.
++void Touchpad(DcCanvas& c) {
++    const float x0 = 4, x1 = c.w - 4.0f, h = std::min(c.h - 8.0f, 30.0f), y0 = (c.h - h) / 2, y1 = y0 + h;
++    Rounded(c, x0, y0, x1, y1, 5, h * 0.45f, {232, 232, 236, 255}, {200, 200, 206, 255});
++    Rounded(c, x0 + 2.4f, y0 + 2.4f, x1 - 2.4f, y1 - 2.4f, 3, h * 0.45f - 2.4f, {44, 44, 48, 255}, {24, 24, 26, 255});
++}
++
++/// Back: a silver pill with its name, as the 360's prompts show it.
++void Back360(DcCanvas& c) {
++    const float h = std::min(c.h - 8.0f, 26.0f), y0 = (c.h - h) / 2, x0 = 3, x1 = c.w - 3.0f;
++    Rounded(c, x0, y0, x1, y0 + h, h / 2, h / 2, {70, 70, 74, 255}, {40, 40, 44, 255});
++    Rounded(c, x0 + 2, y0 + 2, x1 - 2, y0 + h - 2, h / 2 - 2, h / 2 - 2, {238, 238, 240, 255},
++            {168, 170, 176, 255});
++    DcText(c, "BACK", c.w / 2.0f, c.h / 2.0f + 0.5f, h * 0.58f, (x1 - x0) * 0.78f, kInk, false);
++}
++
++} // namespace
++
++std::vector<uint8_t> DrawDc(DcIcon icon, DcStyle style) {
++    static const char* const xbox_names[] = {"LB", "RB", "LT", "RT"};
++    static const char* const ps_names[] = {"L1", "R1", "L2", "R2"};
++    const auto& t = DcTextures[icon];
++    DcCanvas c(t.width, t.height);
++    switch (icon) {
++    case DcCross: case DcCircle: case DcSquare: case DcTriangle: {
++        static const char* const letters[] = {"A", "B", "X", "Y"};
++        static const Color light[] = {{120, 200, 60, 255}, {236, 74, 60, 255}, {70, 140, 236, 255}, {250, 206, 60, 255}};
++        static const Color dark[] = {{40, 120, 20, 255}, {150, 20, 16, 255}, {16, 64, 160, 255}, {196, 132, 8, 255}};
++        if (style == DcXbox360) Gem(c, letters[icon], light[icon], dark[icon]);
++        else if (style == DcXboxOne) FlatFace(c, letters[icon], light[icon]);
++        else PsFace(c, icon);
++        break;
++    }
++    case DcL1: case DcR1: case DcL2: case DcR2: {
++        const int i = icon - DcL1;
++        const bool trigger = icon == DcL2 || icon == DcR2;
++        if (style == DcXbox360) Shoulder360(c, xbox_names[i], trigger);
++        else DarkShoulder(c, style == DcPs5 ? ps_names[i] : xbox_names[i], trigger);
++        break;
++    }
++    case DcL3: case DcR3: {
++        const bool left = icon == DcL3;
++        if (style == DcXbox360) Stick360(c, left ? "LS" : "RS");
++        else DarkStick(c, style == DcPs5 ? (left ? "L3" : "R3") : (left ? "LS" : "RS"));
++        break;
++    }
++    case DcTouchpad: case DcTouchpadSmall:
++        if (style == DcXbox360) Back360(c);
++        else if (style == DcXboxOne) View(c);
++        else Touchpad(c);
++        break;
++    default: break;
++    }
++    std::vector<uint8_t> out(size_t(t.width) * t.height * 4);
++    for (size_t i = 0; i < c.px.size(); ++i) {
++        const float a = c.px[i][3];
++        for (int k = 0; k < 3; ++k) {
++            // Straight colour; fully transparent pixels take a dark grey so filtering at the
++            // edges does not bleed a bright fringe.
++            const float v = a > 0.5f ? c.px[i][k] * 255.0f / a : 20.0f;
++            out[i * 4 + k] = uint8_t(std::clamp(std::lround(v), 0l, 255l));
++        }
++        out[i * 4 + 3] = uint8_t(std::clamp(std::lround(a), 0l, 255l));
++    }
++    return out;
++}
++
++std::vector<uint8_t> EncodeDc(DcIcon icon, const std::vector<uint8_t>& rgba, const std::vector<uint8_t>& original) {
++    const auto& t = DcTextures[icon];
++    std::vector<uint8_t> out = original;
++    out.resize(DcBytes(icon));
++    const int pitch = (t.width + 31) / 32 * 32;
++    for (int by = 0; by < t.height / 4; ++by) {
++        for (int bx = 0; bx < t.width / 4; ++bx) {
++            EncodeBlock(rgba.data(), t.width, bx, by, &out[TiledBlockOffset(bx, by, pitch)]);
++        }
++    }
++    return out;
++}
++
+ } // namespace BbPromptIcons
+diff --git a/gpu/shim/bbport_prompt_icons.h b/gpu/shim/bbport_prompt_icons.h
+index 85b7b33..89b4e08 100644
+--- a/gpu/shim/bbport_prompt_icons.h
++++ b/gpu/shim/bbport_prompt_icons.h
+@@ -74,4 +74,25 @@ std::vector<uint8_t> RenderArea(const Inputs& inputs, const Area& area);
+ /// The same for an icon already drawn (DrawPad).
+ std::vector<uint8_t> RenderIconArea(const Pixels& icon, const Area& area);
+ 
++/// DCport: DriveClub's button icons, each its own BC7 texture in the PS4's tiled layout (rows
++/// and columns of blocks padded to whole 8x8-block micro tiles). Recognised by their upload
++/// hash, as the key-guide icons are. The d-pad icons stay the game's own.
++enum DcIcon : int {
++    DcCross, DcCircle, DcSquare, DcTriangle, DcL1, DcR1, DcL2, DcR2, DcL3, DcR3, DcTouchpad,
++    DcTouchpadSmall, DcCount
++};
++struct DcTexture { int width, height; uint64_t hash; };
++extern const DcTexture DcTextures[DcCount];
++/// The bytes of a DriveClub icon texture, padding included.
++size_t DcBytes(DcIcon icon);
++/// The looks DCport draws: Xbox 360 and Xbox One buttons (Cross is A, Circle B, Square X,
++/// Triangle Y, the touchpad Back or View), and DualSense-style PlayStation symbols.
++enum DcStyle : int { DcXbox360, DcXboxOne, DcPs5, DcStyleCount };
++/// `icon` in `style`, drawn at the icon's size: straight RGBA, width x height.
++std::vector<uint8_t> DrawDc(DcIcon icon, DcStyle style);
++/// `rgba` (the icon's size) encoded into a copy of the game's texture `original` (DcBytes long):
++/// the padding blocks keep the game's bytes.
++std::vector<uint8_t> EncodeDc(DcIcon icon, const std::vector<uint8_t>& rgba,
++                              const std::vector<uint8_t>& original);
++
+ } // namespace BbPromptIcons
+diff --git a/gpu/shim/bbport_prompts.cpp b/gpu/shim/bbport_prompts.cpp
+index 3d44504..cab3bca 100644
+--- a/gpu/shim/bbport_prompts.cpp
++++ b/gpu/shim/bbport_prompts.cpp
+@@ -38,6 +38,8 @@ struct Entry {
+     int sprite;     // BbPromptIcons::HudSprite, or -1
+     Bytes original;
+     uint64_t written;
++    int dc = -1;    // DCport: a BbPromptIcons::DcIcon (a whole DriveClub icon texture), or -1
++    std::array<Bytes, BbPromptIcons::DcStyleCount> looks; // DCport: that icon in each DcStyle
+ };
+ 
+ std::mutex mutex; // entries, the keyboard pictures, searched; never held while guest memory is written
+@@ -52,6 +54,7 @@ std::set<uintptr_t> searched;      // HUD atlases already looked at
+ std::atomic<int> device{-1};       // -1 nothing seen yet, else a Device
+ std::atomic<bool> dirty{false};    // something to write: a new picture, a device or binding change
+ int shown = PlayStation;           // Apply's last decision (window thread): what guest memory has
++int shown_style = -1;              // DCport: the DcStyle (or -1, the game's own) Apply last chose
+ 
+ Device Want() {
+     switch (BbSettings::Get().button_prompts.load(std::memory_order_relaxed)) {
+@@ -86,10 +89,12 @@ void DrawPads() {
+ 
+ /// Byte offsets from `base` of an entry's 16-byte pieces: the whole icon, or each block of the
+ /// sprite's area in the atlas's tiled layout.
+-std::vector<size_t> Pieces(int sprite) {
++std::vector<size_t> Pieces(int sprite, int dc = -1) {
+     std::vector<size_t> out;
+     if (sprite < 0) {
+-        for (size_t at = 0; at < size_t(BbPromptIcons::Bytes); at += 16) out.push_back(at);
++        const size_t bytes = dc >= 0 ? BbPromptIcons::DcBytes(BbPromptIcons::DcIcon(dc))
++                                     : size_t(BbPromptIcons::Bytes);
++        for (size_t at = 0; at < bytes; at += 16) out.push_back(at);
+         return out;
+     }
+     const auto& area = BbPromptIcons::HudAreas[sprite];
+@@ -101,9 +106,9 @@ std::vector<size_t> Pieces(int sprite) {
+     return out;
+ }
+ 
+-Bytes Gather(uintptr_t base, int sprite) {
++Bytes Gather(uintptr_t base, int sprite, int dc = -1) {
+     Bytes out;
+-    for (size_t at : Pieces(sprite)) {
++    for (size_t at : Pieces(sprite, dc)) {
+         const auto* p = reinterpret_cast<const uint8_t*>(base + at);
+         out.insert(out.end(), p, p + 16);
+     }
+@@ -111,8 +116,8 @@ Bytes Gather(uintptr_t base, int sprite) {
+ }
+ 
+ /// The guest range an entry touches (to check that it is mapped and to invalidate it).
+-std::pair<uintptr_t, size_t> Range(uintptr_t base, int sprite) {
+-    const auto pieces = Pieces(sprite);
++std::pair<uintptr_t, size_t> Range(uintptr_t base, int sprite, int dc = -1) {
++    const auto pieces = Pieces(sprite, dc);
+     const auto [lo, hi] = std::minmax_element(pieces.begin(), pieces.end());
+     return {base + *lo, *hi + 16 - *lo};
+ }
+@@ -121,16 +126,45 @@ uint64_t Hash(const Bytes& data) {
+     return XXH3_64bits(data.data(), data.size());
+ }
+ 
+-void Add(uintptr_t base, int icon, int sprite, Bytes original) {
++void Add(uintptr_t base, int icon, int sprite, Bytes original, int dc = -1,
++         std::array<Bytes, BbPromptIcons::DcStyleCount> looks = {}) {
+     std::scoped_lock lock{mutex};
+     for (const Entry& e : entries) {
+         if (e.base == base && e.sprite == sprite) return;
+     }
+     const uint64_t hash = Hash(original);
+-    entries.push_back({base, icon, sprite, std::move(original), hash});
++    entries.push_back({base, icon, sprite, std::move(original), hash, dc, std::move(looks)});
+     dirty = true;
+ }
+ 
++/// DCport: a DriveClub icon texture (one of BbPromptIcons::DcTextures), with its Xbox 360
++/// button drawn and encoded now (once per address; the game reuses few).
++bool AddDriveclub(uintptr_t address, size_t size, uint32_t width, uint32_t height) {
++    for (int i = 0; i < BbPromptIcons::DcCount; ++i) {
++        const auto icon = BbPromptIcons::DcIcon(i);
++        const auto& t = BbPromptIcons::DcTextures[i];
++        if (uint32_t(t.width) != width || uint32_t(t.height) != height || BbPromptIcons::DcBytes(icon) != size) {
++            continue;
++        }
++        Bytes bytes = Gather(address, -1, i);
++        if (Hash(bytes) != t.hash) continue;
++        {
++            std::scoped_lock lock{mutex};
++            for (const Entry& e : entries) {
++                if (e.base == address && e.dc == i) return true;
++            }
++        }
++        static const bool font = BbPromptIcons::SetFont(bb_font_ttf);
++        std::array<Bytes, BbPromptIcons::DcStyleCount> looks;
++        for (int style = 0; font && style < BbPromptIcons::DcStyleCount; ++style) {
++            looks[style] = BbPromptIcons::EncodeDc(icon, BbPromptIcons::DrawDc(icon, BbPromptIcons::DcStyle(style)), bytes);
++        }
++        Add(address, -1, -1, std::move(bytes), i, std::move(looks));
++        return true;
++    }
++    return false;
++}
++
+ } // namespace
+ 
+ void Configure(const char* const* inputs, int count) {
+@@ -193,6 +227,7 @@ void OnUpload(uintptr_t address, size_t size, uint32_t width, uint32_t height, u
+         }
+     }
+     if (levels != 1 || bits != 128) return;
++    if (AddDriveclub(address, size, width, height)) return;
+     if (width == BbPromptIcons::Size && height == BbPromptIcons::Size && size == size_t(BbPromptIcons::Bytes)) {
+         // A KG_* icon: the menus' key guides and the buttons in their messages.
+         Bytes bytes = Gather(address, -1);
+@@ -217,17 +252,26 @@ void OnUpload(uintptr_t address, size_t size, uint32_t width, uint32_t height, u
+ 
+ void Apply() {
+     const Device want = Want();
+-    if (!dirty.exchange(false) && want == shown) return;
++    // DCport: Driveclub's icons follow the controller in its chosen look (settings
++    // xbox_buttons, playstation_buttons); the game's own for a PS4 look or the keyboard.
++    const auto& settings = BbSettings::Get();
++    const int style = want == Xbox ? (settings.xbox_buttons ? BbPromptIcons::DcXboxOne : BbPromptIcons::DcXbox360)
++                      : want == PlayStation && settings.playstation_buttons ? BbPromptIcons::DcPs5
++                                                                            : -1;
++    if (!dirty.exchange(false) && want == shown && style == shown_style) return;
+     shown = want;
++    shown_style = style;
+ 
+     std::vector<Entry> snapshot;
+     std::array<Bytes, BbPromptIcons::Count> icons; // empty: the game's own
+     std::array<Bytes, HudCount> sprites;
+     {
+         std::scoped_lock lock{mutex};
+-        if (want != PlayStation && !keyboard_ready) return;
+         snapshot = entries;
+-        if (want == Keyboard) {
++        // Without the keyboard pictures (input.ini not read yet) the key-guide icons stay the
++        // game's for now; DriveClub's icons need none of them.
++        if (!keyboard_ready) {
++        } else if (want == Keyboard) {
+             icons = keyboard_icons;
+             sprites = keyboard_sprites;
+         } else if (want != PlayStation) {
+@@ -239,17 +283,20 @@ void Apply() {
+     // Written without any lock: a write to a page the texture cache protects faults into it.
+     auto* memory = Core::Memory::Instance();
+     std::vector<std::tuple<uintptr_t, int, uint64_t>> written; // hash 0: the entry is gone
++    static const Bytes none;
+     for (const Entry& e : snapshot) {
+-        const auto [start, length] = Range(e.base, e.sprite);
+-        if (!memory->IsValidMapping(start, length) || Hash(Gather(e.base, e.sprite)) != e.written) {
++        const auto [start, length] = Range(e.base, e.sprite, e.dc);
++        if (!memory->IsValidMapping(start, length) || Hash(Gather(e.base, e.sprite, e.dc)) != e.written) {
+             written.emplace_back(e.base, e.sprite, 0); // unmapped, or the game put something else there
+             continue;
+         }
+-        const Bytes& mine = e.sprite < 0 ? icons[e.icon] : sprites[e.sprite];
++        // DriveClub's icons: the chosen look for the controller in use, else the game's own.
++        const Bytes& mine = e.dc >= 0 ? (style >= 0 ? e.looks[style] : none)
++                            : e.sprite < 0 ? icons[e.icon] : sprites[e.sprite];
+         const Bytes& target = mine.empty() ? e.original : mine;
+         const uint64_t target_hash = Hash(target);
+         if (target_hash == e.written) continue;
+-        const auto pieces = Pieces(e.sprite);
++        const auto pieces = Pieces(e.sprite, e.dc);
+         for (size_t i = 0; i < pieces.size(); ++i) {
+             std::memcpy(reinterpret_cast<void*>(e.base + pieces[i]), &target[i * 16], 16);
+         }
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index 5b985a4..198640f 100644
+index 5b985a4..f86598a 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -14,7 +14,7 @@ namespace {
@@ -15711,7 +16390,18 @@ index 5b985a4..198640f 100644
      } else if (key == "mute_unfocused") {
          v.mute_unfocused = i != 0;
      } else if (key == "button_prompts") {
-@@ -178,7 +184,7 @@ void ConfigureDlssSupport(bool available, const char* problem) {
+@@ -70,6 +76,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
+                          : value == "xbox"        ? PromptsXbox
+                          : value == "switch"      ? PromptsSwitch
+                                                   : PromptsAuto;
++    } else if (key == "xbox_buttons") {
++        v.xbox_buttons = value == "one" ? 1 : 0;
++    } else if (key == "playstation_buttons") {
++        v.playstation_buttons = value == "ps5" ? 1 : 0;
+     } else if (key == "fsr4_auto_exposure") {
+         v.fsr4_auto_exposure = i != 0;
+     } else if (key == "fsr4_invert_jitter") {
+@@ -178,7 +188,7 @@ void ConfigureDlssSupport(bool available, const char* problem) {
      v.dlss_problem = available || kept.empty() ? nullptr : kept.c_str();
      if (v.upscaler == UpscalerDlss && !available) {
          std::printf("Upscaler: DLSS unavailable (%s); falling back to FSR 3.1\n",
@@ -15720,7 +16410,7 @@ index 5b985a4..198640f 100644
          v.upscaler = UpscalerFsr3;
      }
  }
-@@ -206,31 +212,62 @@ bool ResolutionNeedsRestart() {
+@@ -206,36 +216,70 @@ bool ResolutionNeedsRestart() {
           (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa));
  }
  
@@ -15731,7 +16421,8 @@ index 5b985a4..198640f 100644
 +        "upscaler", "preset", "sharpen", "sharpness", "jitter", "reactive", "object_motion",
 +        "reactive_scale", "reactive_threshold", "reactive_max", "debug_view", "show_fps",
 +        "frame_gen", "frame_gen_image_only", "frame_gen_multiplier", "frame_gen_fit_display",
-+        "mute_unfocused", "button_prompts", "motion_blur", "fsr4_auto_exposure", "fsr4_invert_jitter", "model_lod",
++        "mute_unfocused", "button_prompts", "xbox_buttons", "playstation_buttons", "motion_blur",
++        "fsr4_auto_exposure", "fsr4_invert_jitter", "model_lod",
 +        "output_res", "hud_position", "live_resolution"};
 +    std::string kept;
 +    FILE* file = std::fopen(Path(), "r");
@@ -15789,7 +16480,14 @@ index 5b985a4..198640f 100644
      std::fprintf(file, "model_lod=%d\noutput_res=%dx%d\n", v.model_lod.load(),
                   OutputWidths[v.output_res], OutputHeights[v.output_res]);
      std::fprintf(file, "mute_unfocused=%d\n", int(v.mute_unfocused.load()));
-@@ -243,6 +280,7 @@ void Save() {
+     static constexpr const char* prompts[PromptsCount] = {"auto", "playstation", "keyboard", "xbox", "switch"};
+     std::fprintf(file, "button_prompts=%s\n", prompts[std::clamp(v.button_prompts.load(), 0, PromptsCount - 1)]);
++    std::fprintf(file, "xbox_buttons=%s\nplaystation_buttons=%s\n", v.xbox_buttons ? "one" : "360",
++                 v.playstation_buttons ? "ps5" : "ps4");
+     // Read by run.py at start (hud_layout.py).
+     std::fprintf(file, "hud_position=%d\n", v.hud_position.load());
+     // Read by run.py at start (fov.py).
+@@ -243,6 +287,7 @@ void Save() {
      // Read by run.sh at start.
      std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                    : v.live_resolution ? "1" : "0");
@@ -15798,10 +16496,10 @@ index 5b985a4..198640f 100644
  }
  
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e7334..43cd400 100644
+index c0e7334..2200377 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
-@@ -84,6 +84,9 @@ struct Values {
+@@ -84,10 +84,18 @@ struct Values {
      std::atomic<float> reactive_max{0.9f};
      std::atomic<int> debug_view{DebugNone};
      std::atomic<bool> show_fps{false};
@@ -15811,6 +16509,15 @@ index c0e7334..43cd400 100644
      /// Silence the game while its window does not have focus (bbgpu_audio_muted).
      std::atomic<bool> mute_unfocused{false};
      /// Keyboard and mouse button prompts: with the device in use (auto), or always one kind.
+     std::atomic<int> button_prompts{PromptsAuto};
++    /// DCport: the look of Driveclub's controller prompts: Xbox 360 (0) or Xbox One (1) buttons
++    /// for an Xbox controller; the game's PS4 symbols (0) or DualSense-style ones (1) for a
++    /// PlayStation controller.
++    std::atomic<int> xbox_buttons{0};
++    std::atomic<int> playstation_buttons{0};
+     // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.
+     std::atomic<bool> fsr4_auto_exposure{true};
+     std::atomic<bool> fsr4_invert_jitter{false};
 diff --git a/gpu/shim/bbport_toggles.h b/gpu/shim/bbport_toggles.h
 index 57a9486..c458a76 100644
 --- a/gpu/shim/bbport_toggles.h
@@ -18283,6 +18990,69 @@ index e75ed89..6db97ad 100644
      if (!bbgpu_text_input_begin(start,prompt[0] ? prompt : "Text")) ime_complete(0,start);
      else printf("Runtime: ImeDialog opened: shown on screen; keyboard Enter or Cross accepts, Esc or Circle cancels\n");
      return 0;
+diff --git a/tests/test_prompt_icons.cpp b/tests/test_prompt_icons.cpp
+index a5edf37..37e4026 100644
+--- a/tests/test_prompt_icons.cpp
++++ b/tests/test_prompt_icons.cpp
+@@ -157,8 +157,56 @@ int main(int argc, char** argv) {
+         assert(alpha(area.w / 2, area.h / 2) > 200);
+     }
+ 
+-    // PSNR above ~30 dB: differences no one sees at 32x32 in a menu.
+-    assert(worst < 65.0);
++    // DCport: DriveClub's icons in each look DCport draws, at each texture's size, encoded into a
++    // copy of the game's bytes with the padding blocks left as they were.
++    static const char* const dc_names[DcCount] = {"cross_A", "circle_B", "square_X", "triangle_Y", "L1_LB",
++                                                  "R1_RB", "L2_LT", "R2_RT", "L3_LS", "R3_RS",
++                                                  "touchpad_back", "touchpad_back_small"};
++    assert(DcBytes(DcCross) == 4096 && DcBytes(DcL1) == 6144 && DcBytes(DcTouchpad) == 4096 &&
++           DcBytes(DcTouchpadSmall) == 2048);
++    static const char* const style_names[DcStyleCount] = {"x360", "xone", "ps5"};
++    double dc_worst = 0;
++    for (int style = 0; style < DcStyleCount; ++style)
++    for (int i = 0; i < DcCount; ++i) {
++        const auto icon = DcIcon(i);
++        const auto& t = DcTextures[i];
++        const auto rgba = DrawDc(icon, DcStyle(style));
++        assert(rgba.size() == size_t(t.width) * t.height * 4);
++        const std::vector<uint8_t> original(DcBytes(icon), 0xab);
++        const auto encoded = EncodeDc(icon, rgba, original);
++        assert(encoded.size() == original.size() && EncodeDc(icon, rgba, original) == encoded);
++        const int pitch = (t.width + 31) / 32 * 32;
++        std::vector<bool> used(encoded.size() / 16);
++        double sum = 0;
++        for (int by = 0; by < t.height / 4; ++by) {
++            for (int bx = 0; bx < t.width / 4; ++bx) {
++                const size_t at = TiledBlockOffset(bx, by, pitch);
++                used[at / 16] = true;
++                int px[16][4];
++                DecodeBlock(&encoded[at], px);
++                for (int p = 0; p < 16; ++p) {
++                    const uint8_t* d = &rgba[((by * 4 + p / 4) * t.width + bx * 4 + p % 4) * 4];
++                    for (int k = 0; k < 3; ++k) sum += std::pow((px[p][k] - d[k]) * d[3] / 255.0, 2);
++                    sum += std::pow(px[p][3] - d[3], 2);
++                }
++            }
++        }
++        for (size_t b = 0; b < used.size(); ++b) {
++            if (!used[b]) assert(encoded[b * 16] == 0xab && encoded[b * 16 + 15] == 0xab);  // padding kept
++        }
++        const double error = sum / (double(t.width) * t.height * 4);
++        dc_worst = std::max(dc_worst, error);
++        std::printf("dc_%s_%-20s %dx%d mse %6.1f\n", style_names[style], dc_names[i], t.width, t.height, error);
++        if (argc > 1) {
++            std::ofstream(std::string(argv[1]) + "/dc_" + style_names[style] + "_" + dc_names[i] + "_" +
++                              std::to_string(t.width) + "x" + std::to_string(t.height) + ".rgba",
++                          std::ios::binary)
++                .write(reinterpret_cast<const char*>(rgba.data()), rgba.size());
++        }
++    }
++
++    // PSNR above ~30 dB: differences no one sees at 32x32 in a menu (the DriveClub icons too).
++    assert(worst < 65.0 && dc_worst < 65.0);
+     std::printf("prompt icons: all tests passed (worst mse %.1f)\n", worst);
+     return 0;
+ }
 diff --git a/tools/fsr4cap/extract.py b/tools/fsr4cap/extract.py
 index 3e4c88f..6e4d9c6 100644
 --- a/tools/fsr4cap/extract.py

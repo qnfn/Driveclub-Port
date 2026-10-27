@@ -81,6 +81,12 @@ def game_language(paths: AppPaths) -> str:
 
 
 
+def ui_fit(paths: AppPaths) -> str:
+    """dcport.ini ui_fit (SETUP > UI): "1" fits the 16:9 menus and HUD to a 4:3 or 16:10
+    screen's width (the default), "0" stretches them to the whole screen."""
+    return "0" if _ini_value(paths, "ui_fit", "1") == "0" else "1"
+
+
 def game_command(paths: AppPaths, game_dir: Path, fps: int,
                  extra: Sequence[str] = ()) -> list[str]:
     cmd = [str(paths.runtime), str(paths.data / "boot-linked.bin"),
@@ -150,6 +156,11 @@ def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
     threading = _ini_value(paths, "threaded_recording", "auto")
     if threading in ("0", "1"):
         env["BB_THREADED_RECORDING"] = threading
+    # dcport.ini ui_fit=0 (SETUP > UI on 4:3 and 16:10: Stretch): the 16:9 menus and HUD are
+    # stretched to the screen instead of fitted to its width; the 3D view stays unstretched.
+    env.pop("BB_DC_UI_FIT", None)
+    if ui_fit(paths) == "0":
+        env["BB_DC_UI_FIT"] = "0"
     if s.fps == 30:
         env["BB_VBLANK_HZ"] = "60"
         env["BB_FPS_LIMIT"] = "0"

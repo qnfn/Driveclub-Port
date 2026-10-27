@@ -7,6 +7,12 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.5.4
+
+- **Xbox button prompts** (#8): with an Xbox controller, the game's PlayStation button icons become Xbox buttons, in the **Xbox 360** look (the default: glossy A/B/X/Y, LB/RB/LT/RT, LS/RS, Back) or the **Xbox One** look (View instead of Back). With a PlayStation controller they stay the game's own PS4 symbols, or take a **PS5** (DualSense-style) look. All drawn by DCport; the d-pad stays the game's. SETUP > Controller buttons, also in the game's menu (Insert / L3+R3) under Button prompts: Auto follows the controller in use. Requested by @juanme555.
+- **4:3 and 16:10: stretch the UI** (#8): SETUP > Display > UI, Fit (the default, as in 0.5.1: the 16:9 menus and HUD keep their shape and fit the width) or Stretch (they fill the screen, wider than drawn). The race view itself is never stretched.
+- `BB_DC_TEX_DUMP=<folder>` (debugging): writes the textures the game's UI draws with as DDS files, to find things like the button icons.
+
 ## 0.5.3
 
 - **Upscaling: Scaling presets** (FSR edition, new, not fully tested yet): SETUP > Anti-aliasing > Scaling, also in the game's menu (Insert / L3+R3). Native (the default) keeps FSR / DLSS as anti-aliasing at the full render size, as before. Quality (x1.5), Balanced (x1.7), Performance (x2) and Ultra Performance (x3) make the game draw its scene smaller; FSR 3.1, FSR 4 or DLSS then rebuild the full picture after the game's own effects, where the game scales the scene into the display buffer, so the HUD stays sharp. More FPS, a little softer.
@@ -173,7 +179,7 @@ No game files are included. You need your own dump of DRIVECLUB 01.28, EU (CUSA0
 2. The first time, choose your game folder. On the first PLAY, DCport prepares the game files on your PC (once, under a minute).
 3. The launcher has six tabs:
    - **RACE**: game art, ready checks, PLAY, quick frame rate, window and FPS counter
-   - **SETUP**: game folder, player name, language, frame rate (30–240, tested up to 120), window mode and size, FPS counter, threading; FSR edition: anti-aliasing (FSR 3.1 / 4 / 4.1.1 / DLSS), scaling, sharpness, FSR 4.1.1 set-up
+   - **SETUP**: game folder, player name, language, frame rate (30–240, tested up to 120), window mode and size, aspect ratio and UI fit, FPS counter, threading, controller buttons (Xbox 360 / Xbox One / PS4 / PS5); FSR edition: anti-aliasing (FSR 3.1 / 4 / 4.1.1 / DLSS), scaling, sharpness, FSR 4.1.1 set-up
    - **PATCHES**: community game patches (frame-rate patch type, no barriers, no reset, no motion blur/DOF, photo mode)
    - **CONTROLS**: keyboard and controller bindings
    - **GARAGE**: save profiles, backups with restore, shader cache, desktop shortcut, Add to Steam

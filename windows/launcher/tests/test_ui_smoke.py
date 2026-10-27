@@ -371,7 +371,7 @@ def test_run_task_reports_on_the_ui_thread(tmp_path):
 
 
 def test_version_and_bundled_resources(monkeypatch, tmp_path):
-    assert dcport.__version__ == "0.5.3"
+    assert dcport.__version__ == "0.5.4"
     assert theme.default_controls() == DEFAULT_INPUT.resolve()
     assert theme.assets_dir() == DEFAULT_INPUT.resolve().parent / "assets"
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
@@ -1093,6 +1093,47 @@ def test_setup_readbacks_switch_on_by_default_and_reaches_the_runtime(tmp_path):
         page.set_readbacks("0")
         assert page.readbacks_choice.value == "0"
         assert game_env(paths, app.settings, fsr=False, base={})["BB_READBACKS"] == "0"
+    finally:
+        app.destroy()
+
+
+def test_setup_ui_fit_or_stretch_on_narrow_screens(tmp_path):
+    paths, _ = configured_port(tmp_path, prepared=True)
+    app = App(paths, fsr=False)
+    try:
+        app.show("setup"); page = app.pages["setup"]
+        assert page.ui_choice.value == "1" and not page.ui_choice.is_enabled("0")  # 16:9
+        page.set_aspect("4:3")
+        assert page.ui_choice.is_enabled("0") and "fit the width" in page.render_note.cget("text")
+        assert "BB_DC_UI_FIT" not in game_env(paths, app.settings, fsr=False, base={})
+        page.set_ui_fit("0")
+        assert page.ui_choice.value == "0" and read_ini(paths.ini)["ui_fit"] == "0"
+        assert "stretched to fill" in page.render_note.cget("text")
+        assert game_env(paths, app.settings, fsr=False, base={})["BB_DC_UI_FIT"] == "0"
+        page.set_ui_fit("1")
+        assert "BB_DC_UI_FIT" not in game_env(paths, app.settings, fsr=False,
+                                              base={"BB_DC_UI_FIT": "0"})
+    finally:
+        app.destroy()
+
+
+def test_setup_controller_buttons_write_the_game_menus_keys(tmp_path):
+    paths, _ = configured_port(tmp_path, prepared=True)
+    app = App(paths, fsr=False)
+    try:
+        app.show("setup"); page = app.pages["setup"]
+        assert (page.prompts_choice.value, page.xbox_look_choice.value,
+                page.ps_look_choice.value) == ("auto", "360", "ps4")
+        page.set_prompts("xbox_buttons", "one")
+        page.set_prompts("playstation_buttons", "ps5")
+        page.set_prompts("button_prompts", "xbox")
+        ini = read_ini(paths.ini)
+        assert (ini["xbox_buttons"], ini["playstation_buttons"], ini["button_prompts"]) == \
+            ("one", "ps5", "xbox")
+        assert page.xbox_look_choice.value == "one" and page.ps_look_choice.value == "ps5"
+        app.update_game_ini({"button_prompts": "switch"})  # the game's menu has more modes
+        page.refresh_session()
+        assert page.prompts_choice.value == "auto"
     finally:
         app.destroy()
 

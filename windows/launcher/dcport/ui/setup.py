@@ -9,7 +9,7 @@ from dcport import fsr411, patches
 from dcport.game import game_info, ready_checks
 from dcport.prepare_state import is_prepared
 from dcport.runtime import (FPS_PRESETS, LANGUAGES, fps_note, game_language, languages_for,
-                            parse_fps, player_name, scaling, scaling_ini)
+                            parse_fps, player_name, scaling, scaling_ini, ui_fit)
 from dcport.ui import theme
 
 FPS_ERROR = "Enter a whole number from 30 to 240"
@@ -75,6 +75,23 @@ FRAME_GEN_NOTE = ("Frame generation (not fully tested yet, so try it): a generat
                   "menu.")
 
 
+PROMPT_CHOICES = (("auto", "Auto"), ("playstation", "PlayStation"), ("xbox", "Xbox"))
+XBOX_LOOKS = (("360", "Xbox 360"), ("one", "Xbox One"))
+PS_LOOKS = (("ps4", "PS4"), ("ps5", "PS5"))
+PROMPTS_NOTE = ("The game's button icons. Auto follows the controller in use; Xbox and PlayStation "
+                "keep one kind. Xbox 360 and Xbox One are drawn by DCport, PS4 is the game's own and "
+                "PS5 is drawn in the DualSense style. Also in the game's menu (Insert).")
+
+
+def prompts_values(ini: dict) -> tuple[str, str, str]:
+    """dcport.ini button_prompts (auto unless playstation or xbox), xbox_buttons (360 unless
+    one) and playstation_buttons (ps4 unless ps5), as the runtime reads them."""
+    prompts = ini.get("button_prompts", "auto").strip()
+    return (prompts if prompts in ("playstation", "xbox") else "auto",
+            "one" if ini.get("xbox_buttons", "").strip() == "one" else "360",
+            "ps5" if ini.get("playstation_buttons", "").strip() == "ps5" else "ps4")
+
+
 def frame_gen_value(ini: dict) -> str:
     """dcport.ini frame_gen: "fsr3" (or "dlss", which runs as FSR 3.1 here) is On."""
     return "fsr3" if ini.get("frame_gen", "off").strip() in ("fsr3", "dlss") else "off"
@@ -99,8 +116,12 @@ WIDE_NOTE = ("Ultrawide {w}x{h}: the game renders its scene at the full width an
              "{hor:.2f} keeps its height on this screen; higher shows more at the sides but "
              "stretches the edges). Applies on the next PLAY.")
 NARROW_NOTE = ("{shape} {w}x{h}: the game shows the 16:9 view with more above and below (field "
-               "of view {fov:.2f}). The menus and HUD keep their 16:9 shape and fit the width, "
-               "with space above and below. Applies on the next PLAY.")
+               "of view {fov:.2f}). {ui} Applies on the next PLAY.")
+UI_CHOICES = (("1", "Fit"), ("0", "Stretch"))
+UI_NOTES = {"1": "The menus and HUD keep their 16:9 shape and fit the width, with space above "
+                 "and below.",
+            "0": "The menus and HUD are stretched to fill the screen (wider than drawn); the "
+                 "race view itself is not stretched."}
 WIDE_HIGH_NOTE = " A higher Render is not available at this aspect ratio: it renders {lines} lines."
 
 
@@ -127,6 +148,7 @@ class SetupPage(tk.Frame):
         self.upscaler_choice = None
         if app.fsr:
             self._build_upscaling(self.board.add(1, 1, title="Anti-aliasing"))
+        self._build_prompts(self.board.add(2, 0, title="Controller buttons"))
         self._error = ""
         self._phase = app.phase
         self._checks: list[tuple[tk.Label, str]] = []
@@ -289,10 +311,15 @@ class SetupPage(tk.Frame):
         self.aspect_choice = theme.Segmented(grid, app, ASPECT_CHOICES, self.set_aspect,
                                              min_label="1440p")
         self.aspect_choice.grid(row=3, column=1, sticky="w", pady=(app.px(10), 0))
-        theme.text_label(grid, app, "Field of view").grid(row=4, column=0, sticky="w",
+        # 4:3 and 16:10 only: the menus and HUD fitted to the width or stretched (issue #8)
+        theme.text_label(grid, app, "UI").grid(row=4, column=0, sticky="w", pady=(app.px(10), 0))
+        self.ui_choice = theme.Segmented(grid, app, UI_CHOICES, self.set_ui_fit,
+                                         min_label="Fullscreen")
+        self.ui_choice.grid(row=4, column=1, sticky="w", pady=(app.px(10), 0))
+        theme.text_label(grid, app, "Field of view").grid(row=5, column=0, sticky="w",
                                                           pady=(app.px(10), 0))
         row = self._row(grid)
-        row.grid(row=4, column=1, sticky="we", pady=(app.px(10), 0))
+        row.grid(row=5, column=1, sticky="we", pady=(app.px(10), 0))
         self.fov_value = theme.text_label(row, app, "0.66", font="body_bold", width=4,
                                           anchor="e")
         self.fov_value.pack(side="right")
@@ -300,21 +327,21 @@ class SetupPage(tk.Frame):
                                 to=patches.FOV_MAX, on_change=self._fov_moved,
                                 on_commit=self.set_fov)
         self.fov.pack(side="left", fill="x", expand=True, padx=(0, app.px(10)))
-        theme.text_label(grid, app, "FPS counter").grid(row=5, column=0, sticky="w",
+        theme.text_label(grid, app, "FPS counter").grid(row=6, column=0, sticky="w",
                                                         pady=(app.px(10), 0))
         self.counter_choice = theme.Segmented(grid, app, ((True, "On"), (False, "Off")),
                                               self.set_fps_counter, min_label="Fullscreen")
-        self.counter_choice.grid(row=5, column=1, sticky="w", pady=(app.px(10), 0))
-        theme.text_label(grid, app, "Threading").grid(row=6, column=0, sticky="w",
+        self.counter_choice.grid(row=6, column=1, sticky="w", pady=(app.px(10), 0))
+        theme.text_label(grid, app, "Threading").grid(row=7, column=0, sticky="w",
                                                       pady=(app.px(10), 0))
         self.threading_choice = theme.Segmented(grid, app, THREADING_CHOICES, self.set_threading,
                                                 min_label="Fullscreen")
-        self.threading_choice.grid(row=6, column=1, sticky="w", pady=(app.px(10), 0))
-        theme.text_label(grid, app, "GPU readbacks").grid(row=7, column=0, sticky="w",
+        self.threading_choice.grid(row=7, column=1, sticky="w", pady=(app.px(10), 0))
+        theme.text_label(grid, app, "GPU readbacks").grid(row=8, column=0, sticky="w",
                                                           pady=(app.px(10), 0))
         self.readbacks_choice = theme.Segmented(grid, app, READBACKS_CHOICES, self.set_readbacks,
                                                 min_label="Fullscreen")
-        self.readbacks_choice.grid(row=7, column=1, sticky="w", pady=(app.px(10), 0))
+        self.readbacks_choice.grid(row=8, column=1, sticky="w", pady=(app.px(10), 0))
         self.threading_note = theme.text_label(card, app, THREADING_NOTE, font="small",
                                                fg="muted")
         self._wrapping(self.threading_note, card).pack(fill="x", pady=(app.px(12), 0))
@@ -327,6 +354,28 @@ class SetupPage(tk.Frame):
                                              "or L3 + R3 on a controller.", font="small",
                                              fg="muted")
         self._wrapping(self.display_hint, card).pack(fill="x", pady=(app.px(14), 0))
+
+    def _build_prompts(self, card) -> None:
+        app = self.app
+        grid = self._settings_grid(card)
+        rows = (("Prompts", PROMPT_CHOICES, "button_prompts", "prompts_choice"),
+                ("Xbox", XBOX_LOOKS, "xbox_buttons", "xbox_look_choice"),
+                ("PlayStation", PS_LOOKS, "playstation_buttons", "ps_look_choice"))
+        for i, (label, choices, key, name) in enumerate(rows):
+            pad = (app.px(10), 0) if i else 0
+            theme.text_label(grid, app, label).grid(row=i, column=0, sticky="w", pady=pad)
+            choice = theme.Segmented(grid, app, choices,
+                                     lambda v, k=key: self.set_prompts(k, v),
+                                     min_label="PlayStation")
+            choice.grid(row=i, column=1, sticky="w", pady=pad)
+            setattr(self, name, choice)
+        note = theme.text_label(card, app, PROMPTS_NOTE, font="small", fg="muted")
+        self._wrapping(note, card).pack(fill="x", pady=(app.px(12), 0))
+
+    def set_prompts(self, key: str, value: str) -> None:
+        """SETUP > Controller buttons: one of the dcport.ini keys the in-game menu writes too."""
+        self._show_status(self.app.update_game_ini({key: value}) or "")
+        self.refresh_session()
 
     def _build_upscaling(self, card) -> None:
         app = self.app
@@ -443,11 +492,16 @@ class SetupPage(tk.Frame):
         self.fov.set(patches.fov_factor(s))
         self.fov.set_enabled(display.wide)
         self._fov_moved(self.fov.value)
+        fit = ui_fit(app.paths)
+        self.ui_choice.set(fit)
+        for value, _ in UI_CHOICES:  # 16:9 and ultrawide screens show the UI in its own shape
+            self.ui_choice.set_enabled(value, display.narrow)
         if display.custom:
             w, h = display.size
             note = (WIDE_NOTE.format(w=w, h=h, fov=patches.fov(s), hor=patches.hor_plus(s))
                     if display.wide else NARROW_NOTE.format(shape=patches.aspect(s), w=w, h=h,
-                                                            fov=patches.fov_factor(s))) + \
+                                                            fov=patches.fov_factor(s),
+                                                            ui=UI_NOTES[fit])) + \
                 (WIDE_HIGH_NOTE.format(lines=display.lines) if render.size[1] > display.lines else "") + \
                 ("\n\n" + note if high else "")
         hint = patches.screen_hint(app.screen, s)
@@ -458,6 +512,10 @@ class SetupPage(tk.Frame):
         self.counter_choice.set(app.fps_counter_on())
         self.threading_choice.set(threading_value(app.game_ini()))
         self.readbacks_choice.set(readbacks_value(app.game_ini()))
+        prompts, xbox, ps = prompts_values(app.game_ini())
+        self.prompts_choice.set(prompts)
+        self.xbox_look_choice.set(xbox)
+        self.ps_look_choice.set(ps)
         if self.upscaler_choice is not None:
             self._refresh_upscaling()
         self._show_status()
@@ -758,6 +816,10 @@ class SetupPage(tk.Frame):
     def set_threading(self, value: str) -> None:
         self._show_status(self.app.update_game_ini({"threaded_recording": value}) or "")
         self.threading_choice.set(threading_value(self.app.game_ini()))
+
+    def set_ui_fit(self, value: str) -> None:
+        self._show_status(self.app.update_game_ini({"ui_fit": value}) or "")
+        self.refresh_session()
 
     def set_readbacks(self, value: str) -> None:
         self._show_status(self.app.update_game_ini({"readbacks": value}) or "")

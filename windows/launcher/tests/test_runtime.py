@@ -98,6 +98,15 @@ def test_threaded_recording_setting(tmp_path):
         assert e.get("BB_THREADED_RECORDING") == expected
 
 
+def test_ui_fit_setting(tmp_path):
+    paths = AppPaths.for_root(tmp_path)
+    paths.ini.parent.mkdir(parents=True, exist_ok=True)
+    for value, expected in (("0", "0"), ("1", None), ("", None), ("x", None)):
+        paths.ini.write_text(f"ui_fit={value}" + chr(10), encoding="utf-8")
+        e = game_env(paths, LauncherSettings(), fsr=True, base={"BB_DC_UI_FIT": "0"})
+        assert e.get("BB_DC_UI_FIT") == expected
+
+
 def test_language(tmp_path):
     paths = AppPaths.for_root(tmp_path)
     paths.ini.parent.mkdir(parents=True, exist_ok=True)
