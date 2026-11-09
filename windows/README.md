@@ -24,7 +24,7 @@ Not tested in a race yet (no game on the build PC). Every runtime change has a s
 - SETUP > Fixed tick now warns that the game runs in slow motion below 60 FPS.
 - **Support DCport**: a Ko-fi link in the launcher's top bar (https://ko-fi.com/qnfn1). DCport stays free.
 
-Thanks to the driveclub-recomp contributors (MoonFuji, HeyOkay and others): the readback rework and several of these fixes build on their GPL-2.0 work.
+Thanks to the [driveclub-recomp](https://github.com/OverkillLabs3/driveclub-recomp) contributors ([MoonFuji](https://github.com/MoonFuji), [HeyOkay](https://github.com/HeyOkay) and [others](https://github.com/OverkillLabs3/driveclub-recomp/graphs/contributors)): the readback rework and several of these fixes build on their GPL-2.0 work.
 
 ## 0.5.4
 
