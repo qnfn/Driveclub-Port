@@ -9,22 +9,22 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 
 ## 0.5.5
 
-Nothing in 0.5.5 has been tested in a race yet (no game on the build PC). Every runtime change has a switch to turn it off; if something breaks, send the LOG tab's report and turn that switch off in the meantime.
+Not tested in a race yet (no game on the build PC). Every runtime change has a switch to turn it off; if something breaks, send the LOG tab's report and turn that switch off in the meantime.
 
-- **GPU readbacks cost less** (#12): with SETUP > GPU readbacks On (the default), a CPU access to a page the GPU wrote no longer always waits for the GPU. Bytes the GPU never wrote are read straight from memory, recently read data is copied back right after the GPU writes it, large guest copies skip the wait, and three engine buffers no longer share pages with CPU data. Grass and geometry stay correct; the FPS gain is not measured yet. Ported from driveclub-recomp (MoonFuji). Switches: `BB_FAULT_EMULATE=0`, `BB_FAULT_EMULATE_LANES=0`, `BB_GUEST_MEMOPS=0`, `BB_READBACK_EARLY=0`, `BB_SHARED_PAD=0`, `BB_LABEL_VIEW_GPU_ONLY=0`, `BB_READBACK_WINDOW_KB`.
-- **Smoke, fog and fountain mist no longer flicker above 30 FPS** (always on, from driveclub-recomp #254 / PR #280, HeyOkay).
-- **Trophies are remembered**: earned trophies are kept per player in `user/trophies/` and the game is told about them, so trophy-gated rewards (the AMG GT3) no longer lock again after a restart. Trophies from 0.5.4's `trophies.log` come back. `BB_DC_TROPHY_STATE=0` turns it off.
-- **No freeze while scrolling cars in the garage** (from recomp #185): the game's resource manager could deadlock. `BB_DC_RESOURCE_ENTRY=0` turns it off.
-- **Menus scroll at the same speed at any frame rate** (from recomp #109). `BB_DC_MENU_REPEAT=0` turns it off.
-- **No crash when leaving some races** (from recomp #88: an unexpected graphics overlap ended the game; it now recovers).
+- **GPU readbacks cost much less** (#12): with SETUP > GPU readbacks On (the default), the game now only waits for the GPU when it really reads data the GPU wrote. Other reads come straight from memory, recently read data is copied back as soon as the GPU writes it, and large copies skip the wait. Grass and geometry stay correct; the FPS gain is not measured yet. Switches: `BB_FAULT_EMULATE=0`, `BB_FAULT_EMULATE_LANES=0`, `BB_GUEST_MEMOPS=0`, `BB_READBACK_EARLY=0`, `BB_SHARED_PAD=0`, `BB_LABEL_VIEW_GPU_ONLY=0`, `BB_READBACK_WINDOW_KB`.
+- **Smoke, fog and fountain mist no longer flicker above 30 FPS** (always on).
+- **Earned trophies are remembered**: kept per player in `user/trophies/`, so trophy rewards such as the AMG GT3 stay unlocked after a restart. Trophies from 0.5.4 come back. `BB_DC_TROPHY_STATE=0` turns it off.
+- **No more freeze while scrolling cars in the garage.** `BB_DC_RESOURCE_ENTRY=0` turns it off.
+- **Menus scroll at the same speed at any frame rate.** `BB_DC_MENU_REPEAT=0` turns it off.
+- **No crash when leaving some races**: an unexpected graphics overlap now recovers instead of ending the game.
 - **4–6 GB graphics cards**: when video memory runs out, a buffer goes to system memory instead of crashing.
-- **Quit waits for a save in progress** (up to 10 s, "Saving..."): the game menu's Quit game and the window's close button. `BB_DC_QUIT_WAIT=0` turns it off.
-- **SETUP > Texture filtering**: Game (the default), 4x, 8x or 16x anisotropic filtering, for sharper roads at an angle.
-- **SETUP > Overlays**: Block stops other programs' Vulkan layers (overlays, capture tools) from loading into the game; try it if the game crashes at start or shows a black window.
+- **Quit waits for a save in progress** (up to 10 s, "Saving..."), from the game menu and the window's close button. `BB_DC_QUIT_WAIT=0` turns it off.
+- **SETUP > Texture filtering**: Game (the default), 4x, 8x or 16x, for sharper roads at an angle.
+- **SETUP > Overlays**: Block keeps other programs' Vulkan layers (overlays, capture tools) out of the game; try it if the game crashes at start or shows a black window.
 - SETUP > Fixed tick now warns that the game runs in slow motion below 60 FPS.
 - **Support DCport**: a Ko-fi link in the launcher's top bar (https://ko-fi.com/qnfn1). DCport stays free.
 
-Thanks to the driveclub-recomp contributors (GPL-2.0) whose fixes these are based on.
+Thanks to the driveclub-recomp contributors (MoonFuji, HeyOkay and others): the readback rework and several of these fixes build on their GPL-2.0 work.
 
 ## 0.5.4
 
