@@ -1,4 +1,4 @@
 # GitHub Funding configuration (adds the 💖 Sponsor button to the repository)
-ko_fi: blacklineinteractive
-patreon: BlacklineInteractive
-
+ko_fi: qnfn1  # qnfn, DCport's Windows port
+patreon: BlacklineInteractive  # BlackLineInteractive, the original Driveclub Native project
+custom: ["https://ko-fi.com/blacklineinteractive"]

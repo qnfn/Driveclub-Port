@@ -8,6 +8,7 @@ import re
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -28,6 +29,7 @@ from dcport.ui.log import LogPage
 from dcport.ui.race import RacePage
 from dcport.ui.setup import SetupPage
 
+KOFI_URL = "https://ko-fi.com/qnfn1"
 TABS = ("race", "setup", "controls", "garage", "log")
 PAGES = {"race": RacePage, "setup": SetupPage, "controls": ControlsPage, "garage": GaragePage,
          "log": LogPage}
@@ -383,6 +385,12 @@ class App(tk.Tk):
         switch.bind("<Button-1>", lambda e: self.toggle_theme())
         switch.bind("<Enter>", lambda e: switch.configure(fg=self.palette["accent"]))
         switch.bind("<Leave>", lambda e: switch.configure(fg=self.palette["text"]))
+        support = theme.text_label(top, self, "♥ Support DCport", font="small", fg="accent",
+                                   bg="bg", cursor="hand2")
+        support.pack(side="right", padx=(0, self.px(14)))
+        support.bind("<Button-1>", lambda e: webbrowser.open(KOFI_URL))
+        support.bind("<Enter>", lambda e: support.configure(fg=self.palette["text"]))
+        support.bind("<Leave>", lambda e: support.configure(fg=self.palette["accent"]))
 
     def _draw_logo(self, pal: dict) -> None:
         c, font = self._logo, self.fonts["logo"]

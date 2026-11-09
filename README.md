@@ -37,6 +37,11 @@ This is the Windows backend of [Driveclub Native](https://github.com/BlackLineIn
 
 Requirements: Windows 10/11 64-bit, a CPU with AVX, a Vulkan 1.3 GPU. More details and the source layout: [`windows/README.md`](windows/README.md).
 
+## Support
+
+DCport is free. If you'd like to support it: [ko-fi.com/qnfn1](https://ko-fi.com/qnfn1) ♥
+More of my projects: [github.com/qnfn](https://github.com/qnfn)
+
 ## Credits
 
 DCport is built on other people's work: the native PS4 runtime by deadinside28 and Supermedo, and shadPS4's renderer. The Driveclub support, the fixes that make it playable (graphics glitches, lighting, frame rate, fonts, crashes), the launcher and the tools are new.
