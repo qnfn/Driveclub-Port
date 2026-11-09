@@ -49,6 +49,7 @@ DEFAULT_TOGGLES = ()
 # Fixes that run in every session, not offered on the PATCHES page.
 ALWAYS = (
     "Render list category guard",  # a bad render-list category corrupted the renderer heap
+    "Native render feedback timing",  # smoke and mist flickered above 30 FPS (recomp #254)
 )
 
 # The frame-rate patch above 30 FPS; "fixed" is the engine's own 60 Hz tick, which keeps the

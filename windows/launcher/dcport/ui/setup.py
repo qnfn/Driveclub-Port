@@ -36,7 +36,7 @@ TIMING_NOTES = {
     "deltatime": "Smooth at any frame rate. Its authors note that it breaks a few things; "
                  "switch to the fixed tick if something misbehaves.",
     "fixed": "The engine's own 60 Hz tick: everything works, but it is not as smooth above "
-             "60 FPS.",
+             "60 FPS, and below 60 FPS the whole game runs in slow motion.",
 }
 THREADING_CHOICES = (("auto", "Auto"), ("1", "On"), ("0", "Off"))
 THREADING_NOTE = ("Threading: the game's GPU work is prepared on extra threads. It gives more FPS "
@@ -60,6 +60,25 @@ READBACKS_NOTE = ("GPU readbacks: the game gets the GPU's results back exactly w
                   "them. It keeps the roadside grass on the ground and stops stretched "
                   "geometry from the second event on. Costs some FPS. On by default. Applies "
                   "on the next PLAY.")
+
+
+ANISO_CHOICES = (("0", "Game"), ("4", "4x"), ("8", "8x"), ("16", "16x"))
+OVERLAY_CHOICES = (("allow", "Allow"), ("block", "Block"))
+QUALITY_NOTE = ("Texture filtering: sharper roads and ground at an angle (anisotropic filtering); "
+                "Game keeps the game's own. Overlays: Block stops other programs' Vulkan layers "
+                "(Steam overlay, RivaTuner, OBS capture, recording tools) from loading into the "
+                "game; try it if the game crashes or shows a black window. Apply on the next PLAY.")
+
+
+def aniso_value(ini: dict) -> str:
+    """dcport.ini aniso: 4, 8 or 16 forces that level; anything else is the game's own."""
+    value = ini.get("aniso", "0").strip()
+    return value if value in ("4", "8", "16") else "0"
+
+
+def overlays_value(ini: dict) -> str:
+    """dcport.ini overlays: "block" turns off implicit Vulkan layers; anything else allows them."""
+    return "block" if ini.get("overlays", "allow").strip() == "block" else "allow"
 
 
 def readbacks_value(ini: dict) -> str:
@@ -342,12 +361,24 @@ class SetupPage(tk.Frame):
         self.readbacks_choice = theme.Segmented(grid, app, READBACKS_CHOICES, self.set_readbacks,
                                                 min_label="Fullscreen")
         self.readbacks_choice.grid(row=8, column=1, sticky="w", pady=(app.px(10), 0))
+        theme.text_label(grid, app, "Texture filtering").grid(row=9, column=0, sticky="w",
+                                                              pady=(app.px(10), 0))
+        self.aniso_choice = theme.Segmented(grid, app, ANISO_CHOICES, self.set_aniso,
+                                            min_label="Fullscreen")
+        self.aniso_choice.grid(row=9, column=1, sticky="w", pady=(app.px(10), 0))
+        theme.text_label(grid, app, "Overlays").grid(row=10, column=0, sticky="w",
+                                                     pady=(app.px(10), 0))
+        self.overlays_choice = theme.Segmented(grid, app, OVERLAY_CHOICES, self.set_overlays,
+                                               min_label="Fullscreen")
+        self.overlays_choice.grid(row=10, column=1, sticky="w", pady=(app.px(10), 0))
         self.threading_note = theme.text_label(card, app, THREADING_NOTE, font="small",
                                                fg="muted")
         self._wrapping(self.threading_note, card).pack(fill="x", pady=(app.px(12), 0))
         self.readbacks_note = theme.text_label(card, app, READBACKS_NOTE, font="small",
                                                fg="muted")
         self._wrapping(self.readbacks_note, card).pack(fill="x", pady=(app.px(12), 0))
+        self.quality_note = theme.text_label(card, app, QUALITY_NOTE, font="small", fg="muted")
+        self._wrapping(self.quality_note, card).pack(fill="x", pady=(app.px(12), 0))
         self.render_note = theme.text_label(card, app, RENDER_NOTE, font="small", fg="muted")
         self._wrapping(self.render_note, card).pack(fill="x", pady=(app.px(12), 0))
         self.display_hint = theme.text_label(card, app, "More settings in game: press Insert, "
@@ -512,6 +543,8 @@ class SetupPage(tk.Frame):
         self.counter_choice.set(app.fps_counter_on())
         self.threading_choice.set(threading_value(app.game_ini()))
         self.readbacks_choice.set(readbacks_value(app.game_ini()))
+        self.aniso_choice.set(aniso_value(app.game_ini()))
+        self.overlays_choice.set(overlays_value(app.game_ini()))
         prompts, xbox, ps = prompts_values(app.game_ini())
         self.prompts_choice.set(prompts)
         self.xbox_look_choice.set(xbox)
@@ -824,6 +857,14 @@ class SetupPage(tk.Frame):
     def set_readbacks(self, value: str) -> None:
         self._show_status(self.app.update_game_ini({"readbacks": value}) or "")
         self.readbacks_choice.set(readbacks_value(self.app.game_ini()))
+
+    def set_aniso(self, value: str) -> None:
+        self._show_status(self.app.update_game_ini({"aniso": value}) or "")
+        self.aniso_choice.set(aniso_value(self.app.game_ini()))
+
+    def set_overlays(self, value: str) -> None:
+        self._show_status(self.app.update_game_ini({"overlays": value}) or "")
+        self.overlays_choice.set(overlays_value(self.app.game_ini()))
 
     def set_player_name(self, text: str) -> None:
         name = "".join(c for c in text if c.isprintable()).strip()[:16]

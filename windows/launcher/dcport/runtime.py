@@ -156,6 +156,18 @@ def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
     threading = _ini_value(paths, "threaded_recording", "auto")
     if threading in ("0", "1"):
         env["BB_THREADED_RECORDING"] = threading
+    # dcport.ini aniso=4/8/16 (SETUP > Texture filtering): anisotropic filtering forced on the
+    # game's colour textures (runtime DC_ANISO); anything else keeps the game's own.
+    env.pop("DC_ANISO", None)
+    aniso = _ini_value(paths, "aniso", "0")
+    if aniso in ("4", "8", "16"):
+        env["DC_ANISO"] = aniso
+    # dcport.ini overlays=block (SETUP > Overlays): other programs' implicit Vulkan layers
+    # (overlays, capture tools, AMD's switchable-graphics layer) are not loaded; some crash the
+    # game or leave a black window. Idea from driveclub-recomp 01b8bed.
+    env.pop("VK_LOADER_LAYERS_DISABLE", None)
+    if _ini_value(paths, "overlays", "allow") == "block":
+        env["VK_LOADER_LAYERS_DISABLE"] = "~implicit~,VK_LAYER_AMD_switchable_graphics"
     # dcport.ini ui_fit=0 (SETUP > UI on 4:3 and 16:10: Stretch): the 16:9 menus and HUD are
     # stretched to the screen instead of fitted to its width; the 3D view stays unstretched.
     env.pop("BB_DC_UI_FIT", None)

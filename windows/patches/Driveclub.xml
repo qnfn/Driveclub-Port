@@ -551,4 +551,15 @@
             <Line Type="bytes" Address="0x00b10e79" Value="c5fa2cc183e007"/>
         </PatchList>
     </Metadata>
+    <Metadata Title="Driveclub"
+              Name="Native render feedback timing"
+              Note="Always on (DCport fix, idea from driveclub-recomp PR #280 by HeyOkay). Above 30 FPS the game's adaptive renderer read the shorter frame time and made smoke, fog and fountain mist flicker. The renderer's frame-interval feedback at 0x00b3a7f0 now always uses the game's own 30 FPS interval (2); game speed and frame pacing are unchanged."
+              Author="DCport"
+              PatchVer="1.0"
+              AppVer="01.28"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x00b3a7f0" Value="b802000000909090"/>
+        </PatchList>
+    </Metadata>
 </Patch>
