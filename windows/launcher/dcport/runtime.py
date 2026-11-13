@@ -147,6 +147,11 @@ def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
     readbacks = _ini_value(paths, "readbacks", "2")
     if readbacks in ("1", "2"):
         env["BB_READBACKS"] = "2"
+    # Older CPUs (#13): dc-prepare keeps legacy-cpu-plan.json in the data folder only when it
+    # translated the game's BMI1/LZCNT/MOVBE instructions; the runtime then starts on such a CPU.
+    env.pop("BB_CPU_COMPAT", None)
+    if (paths.data / "legacy-cpu-plan.json").is_file():
+        env["BB_CPU_COMPAT"] = "1"
     env.pop("DC_GAME_ARGS", None)
     if args := game_args(s, session_upscale(paths, s, fsr)):
         env["DC_GAME_ARGS"] = args

@@ -72,6 +72,9 @@ def main():
     prepare.prepare(game, data)
     if cpu_compat.enabled():
         legacy_cpu_plan(game, data)
+    else:
+        # The launcher reads this file as "the image is translated" (BB_CPU_COMPAT).
+        (data / 'legacy-cpu-plan.json').unlink(missing_ok=True)
     patched = []
     if xml.is_file():  # no red-zone site may hold an address a community patch writes
         patched = [int(line.get('Address'), 16) - dc_patches.EBOOT_BASE

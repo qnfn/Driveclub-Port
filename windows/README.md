@@ -7,6 +7,10 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.5.7
+
+- **Older CPUs (#13), completed:** 0.5.6 prepared the game on CPUs without BMI1, LZCNT or MOVBE, but the game itself still refused to start there ("unsupported CPU"). The launcher now tells the game when its code was translated, so it starts. Nothing changes on other CPUs.
+
 ## 0.5.6
 
 Tested in races on an AMD RX 6750 XT.

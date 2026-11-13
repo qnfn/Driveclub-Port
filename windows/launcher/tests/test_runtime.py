@@ -161,3 +161,14 @@ def test_restart_command_runs_the_launcher_again(tmp_path):
     (tmp_path / "DriveClub.exe").write_bytes(b"")
     env = game_env(paths, s, fsr=True, base={})
     assert env["BB_RESTART_COMMAND"] == f'"{tmp_path / "DriveClub.exe"}" --play'
+
+
+def test_env_cpu_compat_follows_the_prepared_plan(tmp_path):
+    """#13: the runtime starts on a CPU without BMI1/LZCNT/MOVBE only when dc-prepare translated
+    the game (it keeps legacy-cpu-plan.json in the data folder exactly then)."""
+    paths = AppPaths.for_root(tmp_path)
+    s = LauncherSettings(fps=60)
+    assert "BB_CPU_COMPAT" not in game_env(paths, s, fsr=False, base={"BB_CPU_COMPAT": "1"})
+    paths.data.mkdir(parents=True, exist_ok=True)
+    (paths.data / "legacy-cpu-plan.json").write_text("{}", encoding="utf-8")
+    assert game_env(paths, s, fsr=False, base={})["BB_CPU_COMPAT"] == "1"
