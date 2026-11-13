@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import content_profile  # noqa: E402
+import cpu_compat  # noqa: E402
 import dc_patches  # noqa: E402
 import link_modules  # noqa: E402
 import prepare  # noqa: E402
@@ -27,7 +28,30 @@ import stamp  # noqa: E402
 
 MODULES = ['libc.prx', 'libSceFios2.prx', '../libtbb.prx', '../logiWheel.prx', '../iksemelGNMm.prx']
 PATCHES = ['60 FPS with deltatime']
-KEEP = {'boot-linked.bin', 'content.bin', 'patches.bin', 'source.txt', 'prepare.log'}
+KEEP = {'boot-linked.bin', 'content.bin', 'patches.bin', 'source.txt', 'prepare.log',
+        'legacy-cpu-plan.json'}
+
+
+def legacy_cpu_plan(game, data):
+    """CPUs without BMI1, LZCNT or MOVBE (Intel 3rd generation and older): the translation plan,
+    built here from the player's own eboot and modules (a few minutes, once; kept in the data
+    folder while the files are the same). No game bytes ship with DCport."""
+    import hashlib
+    import json
+    plan = data / 'legacy-cpu-plan.json'
+    try:
+        made_for = json.loads(plan.read_text(encoding='utf-8'))['modules']
+    except (OSError, ValueError, KeyError, TypeError):
+        made_for = None
+    current = {'eboot.bin': hashlib.sha256((game / 'eboot.bin').read_bytes()).hexdigest()}
+    for m in MODULES:
+        current[Path(m).name] = hashlib.sha256((game / 'sce_module' / m).read_bytes()).hexdigest()
+    if made_for != current:
+        print('Older CPU (no BMI1/LZCNT/MOVBE): building its instruction translations from your '
+              'game files, once (a few minutes)...', flush=True)
+        import cpu_plan
+        cpu_plan.build(game, plan, MODULES)
+    os.environ['BB_LEGACY_CPU_PLAN'] = str(plan)
 
 
 def main():
@@ -46,6 +70,8 @@ def main():
               ' Dump the full game (base game + 01.28 update) again.')
         return 1
     prepare.prepare(game, data)
+    if cpu_compat.enabled():
+        legacy_cpu_plan(game, data)
     patched = []
     if xml.is_file():  # no red-zone site may hold an address a community patch writes
         patched = [int(line.get('Address'), 16) - dc_patches.EBOOT_BASE
