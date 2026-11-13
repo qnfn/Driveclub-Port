@@ -7,6 +7,13 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.5.6
+
+Tested in races on an AMD RX 6750 XT.
+
+- **FSR 4.1.2 (FSR edition):** on AMD Radeon RX 6000, 7000 and 9000 cards, FSR 4 now runs AMD's own FSR 4.1.2 (AMD FSR SDK 2.4). The FPS counter shows "FSR 4.1.2" while it is active; on other GPUs, or if the driver does not offer it, FSR 4 works as before. On the RX 6750 XT at 1080p it held 75–100 FPS in a race (GPU readbacks Off, threading On). `BB_FSR412=0` turns it off.
+- **Older CPUs (#13):** on CPUs without BMI1, LZCNT or MOVBE (Intel 3rd generation and older, such as the i7-2700K), preparing the game no longer stops with "legacy-cpu-plan.json" missing. The first prepare now builds DriveClub's instruction translations from your own game files (once, well under a minute) and keeps them in the data folder; no game data ships with DCport. Checked by forcing it on: the game starts and races normally. `legacy_cpu=0` in dcport.ini (or `BB_LEGACY_CPU=0`) turns it off.
+
 ## 0.5.5
 
 Not tested in a race yet (no game on the build PC). Every runtime change has a switch to turn it off; if something breaks, send the LOG tab's report and turn that switch off in the meantime.

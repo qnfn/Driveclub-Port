@@ -1,3 +1,13 @@
+diff --git a/.gitignore b/.gitignore
+index 7075248..64f2bac 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -29,3 +29,5 @@ patches.json
+ # IDE/session-local
+ .claude/
+ .vscode/
++# AMD FSR SDK 2.4 files (tools/fetch_fsr24.py); FSR 4 files never go into git
++fsr24/
 diff --git a/build.sh b/build.sh
 index 70c0c04..e797597 100644
 --- a/build.sh
@@ -10,20 +20,21 @@ index 70c0c04..e797597 100644
 +    out/trophy-test
  fi
 diff --git a/gpu/CMakeLists.txt b/gpu/CMakeLists.txt
-index 529ef05..83aa942 100644
+index 529ef05..d857b77 100644
 --- a/gpu/CMakeLists.txt
 +++ b/gpu/CMakeLists.txt
-@@ -111,6 +111,9 @@ function(add_host_shader FILENAME SHADER_NAME)
+@@ -111,6 +111,10 @@ function(add_host_shader FILENAME SHADER_NAME)
      set(SHADER_HEADERS ${SHADER_HEADERS} ${OUT} PARENT_SCOPE)
  endfunction()
  add_host_shader(color_to_ms_depth.frag color_to_ms_depth_frag)
 +add_host_shader(ms_depth_to_color.frag ms_depth_to_color_frag)
 +add_host_shader(dc_motion.comp dc_motion_comp)
 +add_host_shader(dc_merge.comp dc_merge_comp)
++add_host_shader(fsr412_prepare.comp fsr412_prepare_comp)
  add_host_shader(ms_image_blit.frag ms_image_blit_frag)
  add_host_shader(ms_image_blit.frag ms_image_blit_msaa_frag SRC_MSAA=1)
  add_host_shader(fault_buffer_process.comp fault_buffer_process_comp)
-@@ -274,7 +277,9 @@ if (WIN32)
+@@ -274,7 +278,9 @@ if (WIN32)
              $<$<COMPILE_LANGUAGE:C>:-Wno-error=unused-but-set-global>)
      endif()
      target_include_directories(bb-probe PRIVATE .. ../src)
@@ -34,7 +45,7 @@ index 529ef05..83aa942 100644
      # The PS4 range (64 GiB - 1 TiB) must stay free: no high-entropy ASLR for heaps and stacks.
      # The guest main thread runs on the process stack: 16 MiB, committed (no stack probes).
      target_link_options(bb-probe PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
-@@ -341,3 +346,14 @@ add_executable(fsr4-bench EXCLUDE_FROM_ALL tools/fsr4_bench.cpp
+@@ -341,3 +347,14 @@ add_executable(fsr4-bench EXCLUDE_FROM_ALL tools/fsr4_bench.cpp
      shadps4/video_core/renderer_vulkan/fsr411/fsr411.cpp)
  target_include_directories(fsr4-bench PRIVATE shadps4/video_core/renderer_vulkan/fsr411)
  target_link_libraries(fsr4-bench PRIVATE ffx-vulkan::fsr4-v07-vulkan ffx-vulkan::fsr4-v07-assets Vulkan::Vulkan)
@@ -4365,6 +4376,35 @@ index 0000000..ab0d5b7
 +        vec2(Ca(100u), Ca(101u)) * prev_clip.xy / prev_clip.w + vec2(Ca(102u), Ca(103u));
 +    imageStore(motion_img, pixel, vec4((prev_uv - uv) * size, 0.0, 0.0));
 +}
+diff --git a/gpu/shadps4/video_core/host_shaders/fsr412_prepare.comp b/gpu/shadps4/video_core/host_shaders/fsr412_prepare.comp
+new file mode 100644
+index 0000000..717820b
+--- /dev/null
++++ b/gpu/shadps4/video_core/host_shaders/fsr412_prepare.comp
+@@ -0,0 +1,23 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// FSR 4.1.2 inputs: the scene color as RGBA16F and the depth as R32F, reversed (1 = near) unless
++// the game's depth already is.
++#version 450
++layout(local_size_x = 8, local_size_y = 8) in;
++layout(binding = 0) uniform sampler2D color_in;
++layout(binding = 1) uniform sampler2D depth_in;
++layout(binding = 2, rgba16f) uniform writeonly image2D color_out;
++layout(binding = 3, r32f) uniform writeonly image2D depth_out;
++layout(push_constant) uniform Params {
++    uvec2 size;
++    uint reverse_depth;
++} p;
++
++void main() {
++    const ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
++    if (any(greaterThanEqual(uvec2(xy), p.size))) {
++        return;
++    }
++    imageStore(color_out, xy, texelFetch(color_in, xy, 0));
++    const float depth = texelFetch(depth_in, xy, 0).r;
++    imageStore(depth_out, xy, vec4(p.reverse_depth != 0u ? 1.0 - depth : depth));
++}
 diff --git a/gpu/shadps4/video_core/host_shaders/ms_depth_to_color.frag b/gpu/shadps4/video_core/host_shaders/ms_depth_to_color.frag
 new file mode 100644
 index 0000000..941eb89
@@ -5353,10 +5393,35 @@ index 3041663..775b196 100644
      void EndCapture(vk::CommandBuffer cmdbuf, std::array<float, 2> jitter, bool motion_valid,
                      Camera camera = {});
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
-index 2c70bba..ff2041b 100644
+index 2c70bba..1660369 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr4.cpp
-@@ -133,7 +133,7 @@ struct Fsr4Upscaler::Impl {
+@@ -14,6 +14,7 @@
+ #include "ffx_vk_fsr4_v07_assets.h"
+ #include "bbport_settings.h"
+ #include "video_core/renderer_vulkan/fsr411/fsr411.h"
++#include "video_core/renderer_vulkan/vk_fsr412.h"
+ #include "video_core/renderer_vulkan/vk_instance.h"
+ #include "video_core/renderer_vulkan/vk_scheduler.h"
+ 
+@@ -71,9 +72,15 @@ struct Fsr4Upscaler::Impl {
+     std::unique_ptr<Fsr411::Upscaler> fsr411;
+     std::deque<u64> fsr411_ticks; ///< scheduler ticks of its recent frames (constant ring)
+     std::string fsr411_described;
++    // FSR 4.1.2 (AMD's SDK) when its DLL is there; null once it failed: v07 for the session.
++    std::unique_ptr<Fsr412> fsr412;
+ 
+     Impl(const Instance& instance_, Scheduler& scheduler_)
+-        : instance{instance_}, scheduler{scheduler_} {}
++        : instance{instance_}, scheduler{scheduler_} {
++        if (Fsr412::Wanted(instance.GetVendorID())) {
++            fsr412 = std::make_unique<Fsr412>(instance, scheduler);
++        }
++    }
+ 
+     ~Impl() {
+         Destroy();
+@@ -133,7 +140,7 @@ struct Fsr4Upscaler::Impl {
              if (ReadFile(dir + name, data)) {
                  return true;
              }
@@ -5365,7 +5430,7 @@ index 2c70bba..ff2041b 100644
              return false;
          };
          if (!load(assets.pre, code[0])) return false;
-@@ -190,6 +190,9 @@ struct Fsr4Upscaler::Impl {
+@@ -190,6 +197,9 @@ struct Fsr4Upscaler::Impl {
          ffxCreateContextDescUpscale desc{};
          desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
          desc.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
@@ -5375,7 +5440,7 @@ index 2c70bba..ff2041b 100644
          // Any preset's render size fits: the context is not recreated for a size change.
          desc.maxRenderSize = {(ow + 7) & ~7u, (oh + 7) & ~7u};
          desc.maxUpscaleSize = {(ow + 7) & ~7u, (oh + 7) & ~7u};
-@@ -233,7 +236,7 @@ struct Fsr4Upscaler::Impl {
+@@ -233,7 +243,7 @@ struct Fsr4Upscaler::Impl {
  
      bool Record411(const Frame& f) {
          if (!instance.IsFsr411Supported()) {
@@ -5384,7 +5449,7 @@ index 2c70bba..ff2041b 100644
              return false;
          }
          if (!fsr411) {
-@@ -262,8 +265,13 @@ struct Fsr4Upscaler::Impl {
+@@ -262,8 +272,13 @@ struct Fsr4Upscaler::Impl {
          g.reset = f.reset;
          g.auto_exposure = f.auto_exposure;
          if (!fsr411->Record(g)) {
@@ -5400,11 +5465,37 @@ index 2c70bba..ff2041b 100644
              return false;
          }
          fsr411_ticks.push_back(scheduler.CurrentTick());
-@@ -383,6 +391,10 @@ Fsr4Upscaler::Fsr4Upscaler(const Instance& instance, Scheduler& scheduler)
+@@ -279,6 +294,22 @@ struct Fsr4Upscaler::Impl {
+         if (BbSettings::Get().upscaler == BbSettings::UpscalerFsr411) {
+             return Record411(f);
+         }
++        if (fsr412) {
++            if (fsr412->Record(f)) {
++                BbSettings::Get().fsr412_active = true;
++                problem.clear();
++                return true;
++            }
++            if (!fsr412->Fatal()) {
++                problem = "FSR 4.1.2: " + fsr412->Error();
++                return false;
++            }
++            std::printf("Upscaler: FSR 4.1.2 unavailable (%s); FSR 4 uses the v07 model\n",
++                        fsr412->Error().c_str());
++            fsr412->ReleaseWhileRecording();
++            fsr412.reset();
++            BbSettings::Get().fsr412_active = false;
++        }
+         if (fatal) {
+             return false;
+         }
+@@ -383,6 +414,13 @@ Fsr4Upscaler::Fsr4Upscaler(const Instance& instance, Scheduler& scheduler)
  
  Fsr4Upscaler::~Fsr4Upscaler() = default;
  
 +void Fsr4Upscaler::ReleaseWhileRecording() {
++    if (impl->fsr412) {
++        impl->fsr412->ReleaseWhileRecording();
++    }
 +    impl->Destroy(true);
 +}
 +
@@ -5437,19 +5528,597 @@ index 506cc51..6fd582b 100644
      /// Records FSR 4 into `frame.cmdbuf`; the output stays in General. False when FSR 4
      /// cannot run (Problem() says why; missing assets or device features are permanent).
      bool Record(const Frame& frame);
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr412.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr412.cpp
+new file mode 100644
+index 0000000..b499ece
+--- /dev/null
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr412.cpp
+@@ -0,0 +1,527 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "video_core/renderer_vulkan/vk_fsr412.h"
++
++#include <cstdio>
++#include <cstdlib>
++#include <deque>
++#include <string>
++#include <vector>
++
++#if defined(_WIN32) && __has_include("../../../../fsr24/sdk/upscalers/include/ffx_upscale.h")
++#define BB_HAVE_FSR412 1
++#include <windows.h>
++#include <vulkan/vulkan.h>
++// SDK 2.4 headers by path: the include path holds FSR-Vulkan's SDK 2.3 copies of the same names.
++#include "../../../../fsr24/sdk/api/include/ffx_api.h"
++// The SDK's loader body is only compiled for _WINDOWS (MSBuild); MinGW defines _WIN32 only.
++#ifndef _WINDOWS
++#define _WINDOWS 1
++#define BB_FSR412_UNDEF_WINDOWS 1
++#endif
++#include "../../../../fsr24/sdk/api/include/ffx_api_loader.h"
++#ifdef BB_FSR412_UNDEF_WINDOWS
++#undef _WINDOWS
++#undef BB_FSR412_UNDEF_WINDOWS
++#endif
++#include "../../../../fsr24/sdk/api/include/vk/ffx_api_vk.h"
++#include "../../../../fsr24/sdk/upscalers/include/ffx_upscale.h"
++#endif
++
++#include "video_core/renderer_vulkan/vk_instance.h"
++#include "video_core/renderer_vulkan/vk_platform.h"
++#include "video_core/renderer_vulkan/vk_scheduler.h"
++#include "video_core/renderer_vulkan/vk_shader_util.h"
++#include "video_core/texture_cache/image.h"
++
++#ifdef BB_HAVE_FSR412
++#include "video_core/host_shaders/fsr412_prepare_comp.h"
++#endif
++
++namespace Vulkan {
++
++#ifdef BB_HAVE_FSR412
++
++namespace {
++
++std::wstring DllPath() {
++    std::wstring path(MAX_PATH, L'\0');
++    for (;;) {
++        const DWORD size = GetModuleFileNameW(nullptr, path.data(), DWORD(path.size()));
++        if (size == 0) {
++            return {};
++        }
++        if (size < path.size()) {
++            path.resize(size);
++            break;
++        }
++        path.resize(path.size() * 2);
++    }
++    path.resize(path.find_last_of(L"\\/") + 1);
++    return path + L"fsr24\\amd_fidelityfx_upscaler_vk.dll";
++}
++
++/// AMD's DLL, loaded once by its full path (never another copy with the same name) and kept
++/// until exit: contexts may outlive their user.
++const ffxFunctions* Api(std::string& error) {
++    static ffxFunctions functions{};
++    static std::string failure;
++    static const bool loaded = [] {
++        const std::wstring path = DllPath();
++        const HMODULE module = path.empty() ? nullptr
++            : LoadLibraryExW(path.c_str(), nullptr,
++                             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
++        if (!module) {
++            failure = "cannot load fsr24\\amd_fidelityfx_upscaler_vk.dll (Windows error " +
++                      std::to_string(GetLastError()) + ")";
++            return false;
++        }
++        ffxLoadFunctions(&functions, module);
++        if (!functions.CreateContext || !functions.DestroyContext || !functions.Query ||
++            !functions.Dispatch) {
++            failure = "amd_fidelityfx_upscaler_vk.dll lacks the FSR API";
++            return false;
++        }
++        return true;
++    }();
++    if (!loaded) {
++        error = failure;
++        return nullptr;
++    }
++    return &functions;
++}
++
++bool Is412(const char* name) {
++    return name && std::string_view{name}.starts_with("4.1.2");
++}
++
++} // namespace
++
++bool Fsr412::Wanted(u32 vendor_id) {
++    static const bool wanted = [vendor_id] {
++        const char* env = std::getenv("BB_FSR412");
++        if ((env && env[0] == '0') || vendor_id != 0x1002) {
++            return false;
++        }
++        const std::wstring path = DllPath();
++        return !path.empty() && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
++    }();
++    return wanted;
++}
++
++struct Fsr412::Impl {
++    const Instance& instance;
++    Scheduler& scheduler;
++    const ffxFunctions* api = nullptr;
++    ffxContext context = nullptr;
++    u32 out_width = 0, out_height = 0;
++    bool context_auto_exposure = false;
++    std::deque<u64> ticks; ///< scheduler ticks of the frames the provider may still use
++    std::string error;
++    bool fatal = false;
++
++    VideoCore::UniqueImage color, depth;
++    vk::UniqueImageView color_view, depth_view;
++    u32 input_width = 0, input_height = 0;
++    vk::UniqueDescriptorSetLayout prepare_set;
++    vk::UniquePipelineLayout prepare_layout;
++    vk::UniquePipeline prepare_pipeline;
++    vk::UniqueSampler sampler;
++
++    Impl(const Instance& instance_, Scheduler& scheduler_)
++        : instance{instance_}, scheduler{scheduler_} {}
++
++    ~Impl() {
++        Destroy(false);
++    }
++
++    void Destroy(bool recording) {
++        if (!context) {
++            return;
++        }
++        if (recording) {
++            scheduler.WaitSubmitted();
++        } else {
++            scheduler.Finish();
++        }
++        api->DestroyContext(&context, nullptr);
++        context = nullptr;
++        ticks.clear();
++    }
++
++    bool Fail(std::string reason, bool permanent) {
++        if (error != reason) {
++            std::printf("Upscaler: FSR 4.1.2: %s\n", reason.c_str());
++        }
++        error = std::move(reason);
++        fatal |= permanent;
++        return false;
++    }
++
++    VkDeviceContext Device() const {
++        return {VkDevice(instance.GetDevice()), VkPhysicalDevice(instance.GetPhysicalDevice()),
++                VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr};
++    }
++
++    /// AMD's 4.1.2 provider for this GPU and driver, or 0.
++    u64 Provider() {
++        VkDeviceContext device = Device();
++        u64 count = 0;
++        ffxQueryDescGetVersions query{};
++        query.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
++        query.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
++        query.device = &device;
++        query.outputCount = &count;
++        if (api->Query(nullptr, &query.header) != FFX_API_RETURN_OK || count == 0 || count > 64) {
++            return 0;
++        }
++        std::vector<u64> ids(count);
++        std::vector<const char*> names(count);
++        query.versionIds = ids.data();
++        query.versionNames = names.data();
++        if (api->Query(nullptr, &query.header) != FFX_API_RETURN_OK) {
++            return 0;
++        }
++        for (u64 i = 0; i < count && i < ids.size(); ++i) {
++            if (Is412(names[i])) {
++                return ids[i];
++            }
++        }
++        return 0;
++    }
++
++    bool Create(const Fsr4Upscaler::Frame& f) {
++        if (!api && !(api = Api(error))) {
++            return Fail(error, true);
++        }
++        if (!instance.IsFsr412DeviceReady()) {
++            return Fail("the Vulkan device lacks the features AMD's FSR SDK needs", true);
++        }
++        const u64 provider = Provider();
++        if (!provider) {
++            return Fail("AMD's FSR 4.1.2 is not offered for this GPU or driver", true);
++        }
++        ffxCreateBackendVKDesc backend{};
++        backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
++        backend.deviceContext = Device();
++        ffxCreateContextDescUpscaleVersion version{};
++        version.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE_VERSION;
++        version.version = (4u << 22) | (1u << 12) | 2u;
++        ffxOverrideVersion override_version{};
++        override_version.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
++        override_version.versionId = provider;
++        backend.header.pNext = &version.header;
++        version.header.pNext = &override_version.header;
++        ffxCreateContextDescUpscale create{};
++        create.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
++        create.header.pNext = &backend.header;
++        // The prepare pass hands depth over reversed; Driveclub's is reversed and infinite.
++        create.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_DEPTH_INVERTED;
++        if (Fsr4Upscaler::reversed_infinite_depth) {
++            create.flags |= FFX_UPSCALE_ENABLE_DEPTH_INFINITE;
++        }
++        if (f.auto_exposure) {
++            create.flags |= FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
++        }
++        if (const char* env = std::getenv("BB_FSR24_DEBUG"); env && env[0] == '1') {
++            create.flags |= FFX_UPSCALE_ENABLE_DEBUG_CHECKING;
++        }
++        // Any preset's render size fits: no new context for a scale change.
++        create.maxRenderSize = {f.output.width, f.output.height};
++        create.maxUpscaleSize = {f.output.width, f.output.height};
++        create.fpMessage = [](uint32_t type, const wchar_t* message) {
++            if (message) {
++                std::printf("FSR SDK 2.4 message %u: %ls\n", type, message);
++            }
++        };
++        ffxContext created = nullptr;
++        if (const auto rc = api->CreateContext(&created, &create.header, nullptr);
++            rc != FFX_API_RETURN_OK || !created) {
++            return Fail("context creation failed (" + std::to_string(rc) + ")", true);
++        }
++        ffxQueryGetProviderVersion used{};
++        used.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
++        if (api->Query(&created, &used.header) != FFX_API_RETURN_OK || !Is412(used.versionName)) {
++            api->DestroyContext(&created, nullptr);
++            return Fail("AMD's SDK did not pick its 4.1.2 provider", true);
++        }
++        context = created;
++        out_width = f.output.width;
++        out_height = f.output.height;
++        context_auto_exposure = f.auto_exposure;
++        std::printf("Upscaler: FSR %s (AMD FSR SDK 2.4, Vulkan), output %ux%u\n",
++                    used.versionName, out_width, out_height);
++        return true;
++    }
++
++    void CreatePreparePipeline() {
++        const vk::Device device = instance.GetDevice();
++        std::array<vk::DescriptorSetLayoutBinding, 4> bindings{};
++        for (u32 i = 0; i < bindings.size(); ++i) {
++            bindings[i] = {.binding = i,
++                           .descriptorType = i < 2 ? vk::DescriptorType::eCombinedImageSampler
++                                                   : vk::DescriptorType::eStorageImage,
++                           .descriptorCount = 1,
++                           .stageFlags = vk::ShaderStageFlagBits::eCompute};
++        }
++        prepare_set = Check(device.createDescriptorSetLayoutUnique(
++            {.flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
++             .bindingCount = u32(bindings.size()),
++             .pBindings = bindings.data()}));
++        const vk::PushConstantRange push{vk::ShaderStageFlagBits::eCompute, 0, 3 * sizeof(u32)};
++        prepare_layout = Check(device.createPipelineLayoutUnique({.setLayoutCount = 1,
++                                                                  .pSetLayouts = &*prepare_set,
++                                                                  .pushConstantRangeCount = 1,
++                                                                  .pPushConstantRanges = &push}));
++        const auto module = CompileSPV(FSR412_PREPARE_COMP, device);
++        prepare_pipeline = Check(device.createComputePipelineUnique(
++            {}, {.stage = {.stage = vk::ShaderStageFlagBits::eCompute,
++                           .module = module,
++                           .pName = "main"},
++                 .layout = *prepare_layout}));
++        device.destroyShaderModule(module);
++        sampler = Check(device.createSamplerUnique(
++            {.magFilter = vk::Filter::eNearest,
++             .minFilter = vk::Filter::eNearest,
++             .mipmapMode = vk::SamplerMipmapMode::eNearest,
++             .addressModeU = vk::SamplerAddressMode::eClampToEdge,
++             .addressModeV = vk::SamplerAddressMode::eClampToEdge,
++             .addressModeW = vk::SamplerAddressMode::eClampToEdge}));
++    }
++
++    /// Copies the frame's color and depth into the formats and depth direction the SDK is told.
++    void Prepare(const Fsr4Upscaler::Frame& f) {
++        if (!prepare_pipeline) {
++            CreatePreparePipeline();
++        }
++        const u32 w = f.render_width, h = f.render_height;
++        const bool resized = w != input_width || h != input_height;
++        if (resized) {
++            scheduler.WaitSubmitted();
++            const auto make = [&](VideoCore::UniqueImage& image, vk::UniqueImageView& view,
++                                  vk::Format format) {
++                view.reset();
++                image = VideoCore::UniqueImage(instance.GetDevice(), instance.GetAllocator());
++                image.Create({.imageType = vk::ImageType::e2D,
++                              .format = format,
++                              .extent = {w, h, 1},
++                              .mipLevels = 1,
++                              .arrayLayers = 1,
++                              .samples = vk::SampleCountFlagBits::e1,
++                              .tiling = vk::ImageTiling::eOptimal,
++                              .usage = vk::ImageUsageFlagBits::eStorage |
++                                       vk::ImageUsageFlagBits::eSampled,
++                              .initialLayout = vk::ImageLayout::eUndefined});
++                view = Check(instance.GetDevice().createImageViewUnique(
++                    {.image = vk::Image(image),
++                     .viewType = vk::ImageViewType::e2D,
++                     .format = format,
++                     .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}}));
++            };
++            make(color, color_view, vk::Format::eR16G16B16A16Sfloat);
++            make(depth, depth_view, vk::Format::eR32Sfloat);
++            input_width = w;
++            input_height = h;
++        }
++        // Earlier readers (last frame's dispatch) are done before the copies overwrite them.
++        std::array<vk::ImageMemoryBarrier2, 2> to_general{};
++        for (u32 i = 0; i < 2; ++i) {
++            to_general[i] = {
++                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
++                .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
++                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
++                .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
++                .oldLayout = resized ? vk::ImageLayout::eUndefined
++                                     : vk::ImageLayout::eShaderReadOnlyOptimal,
++                .newLayout = vk::ImageLayout::eGeneral,
++                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .image = i ? vk::Image(depth) : vk::Image(color),
++                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}};
++        }
++        f.cmdbuf.pipelineBarrier2(
++            {.imageMemoryBarrierCount = 2, .pImageMemoryBarriers = to_general.data()});
++        const std::array<vk::ImageView, 4> views{f.color.view, f.depth.view, *color_view,
++                                                 *depth_view};
++        std::array<vk::DescriptorImageInfo, 4> infos{};
++        std::array<vk::WriteDescriptorSet, 4> writes{};
++        for (u32 i = 0; i < 4; ++i) {
++            infos[i] = {.sampler = i < 2 ? *sampler : vk::Sampler{},
++                        .imageView = views[i],
++                        .imageLayout = vk::ImageLayout::eGeneral};
++            writes[i] = {.dstBinding = i,
++                         .descriptorCount = 1,
++                         .descriptorType = i < 2 ? vk::DescriptorType::eCombinedImageSampler
++                                                 : vk::DescriptorType::eStorageImage,
++                         .pImageInfo = &infos[i]};
++        }
++        const std::array<u32, 3> constants{w, h,
++                                           Fsr4Upscaler::reversed_infinite_depth ? 0u : 1u};
++        f.cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *prepare_pipeline);
++        f.cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *prepare_layout, 0, writes);
++        f.cmdbuf.pushConstants(*prepare_layout, vk::ShaderStageFlagBits::eCompute, 0,
++                               sizeof(constants), constants.data());
++        f.cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
++    }
++
++    /// The SDK reads its inputs in ShaderReadOnlyOptimal and writes the output in General.
++    /// `before`: around the dispatch; afterwards motion goes back to General (its owner's
++    /// layout) while the prepared images stay readable until the next Prepare.
++    void Transition(const Fsr4Upscaler::Frame& f, bool before) {
++        const vk::ImageLayout general = vk::ImageLayout::eGeneral;
++        const vk::ImageLayout read = vk::ImageLayout::eShaderReadOnlyOptimal;
++        std::array<vk::ImageMemoryBarrier2, 3> images{};
++        const std::array<vk::Image, 3> targets{vk::Image(color), vk::Image(depth), f.motion.image};
++        u32 count = 0;
++        for (u32 i = 0; i < targets.size(); ++i) {
++            if (!before && i < 2) {
++                continue;
++            }
++            images[count++] = {
++                .srcStageMask = before ? vk::PipelineStageFlagBits2::eAllCommands
++                                       : vk::PipelineStageFlagBits2::eComputeShader,
++                .srcAccessMask = before ? vk::AccessFlagBits2::eMemoryWrite
++                                        : vk::AccessFlagBits2::eShaderRead,
++                .dstStageMask = before ? vk::PipelineStageFlagBits2::eComputeShader
++                                       : vk::PipelineStageFlagBits2::eAllCommands,
++                .dstAccessMask = before ? vk::AccessFlagBits2::eShaderRead
++                                        : vk::AccessFlagBits2::eMemoryRead |
++                                              vk::AccessFlagBits2::eMemoryWrite,
++                .oldLayout = before ? general : read,
++                .newLayout = before ? read : general,
++                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++                .image = targets[i],
++                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}};
++        }
++        // The output (General): earlier users are done before the SDK writes it, and its
++        // writes are visible to everything after.
++        const vk::MemoryBarrier2 memory{
++            .srcStageMask = before ? vk::PipelineStageFlagBits2::eAllCommands
++                                   : vk::PipelineStageFlagBits2::eComputeShader,
++            .srcAccessMask = before ? vk::AccessFlagBits2::eMemoryRead |
++                                          vk::AccessFlagBits2::eMemoryWrite
++                                    : vk::AccessFlagBits2::eShaderStorageWrite,
++            .dstStageMask = before ? vk::PipelineStageFlagBits2::eComputeShader
++                                   : vk::PipelineStageFlagBits2::eAllCommands,
++            .dstAccessMask = before ? vk::AccessFlagBits2::eShaderStorageRead |
++                                          vk::AccessFlagBits2::eShaderStorageWrite
++                                    : vk::AccessFlagBits2::eMemoryRead |
++                                          vk::AccessFlagBits2::eMemoryWrite,
++        };
++        f.cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1,
++                                   .pMemoryBarriers = &memory,
++                                   .imageMemoryBarrierCount = count,
++                                   .pImageMemoryBarriers = images.data()});
++    }
++
++    static FfxApiResource Resource(vk::Image image, u32 width, u32 height, u32 format,
++                                   bool output) {
++        FfxApiResource r{};
++        r.resource = reinterpret_cast<void*>(VkImage(image));
++        r.description.type = FFX_API_RESOURCE_TYPE_TEXTURE2D;
++        r.description.format = format;
++        r.description.width = width;
++        r.description.height = height;
++        r.description.depth = 1;
++        r.description.mipCount = 1;
++        r.description.usage = output ? FFX_API_RESOURCE_USAGE_UAV : FFX_API_RESOURCE_USAGE_READ_ONLY;
++        r.state = output ? FFX_API_RESOURCE_STATE_UNORDERED_ACCESS
++                         : FFX_API_RESOURCE_STATE_COMPUTE_READ;
++        return r;
++    }
++
++    bool Record(const Fsr4Upscaler::Frame& f) {
++        if (fatal) {
++            return false;
++        }
++        if (f.motion.width != f.render_width || f.motion.height != f.render_height) {
++            return Fail("motion vectors are not at the render size", false);
++        }
++        if (context && (f.output.width != out_width || f.output.height != out_height ||
++                        f.auto_exposure != context_auto_exposure)) {
++            Destroy(true);
++        }
++        if (!context && !Create(f)) {
++            return false;
++        }
++        // The provider's per-frame resources: at most 3 frames in flight.
++        while (ticks.size() >= 3) {
++            scheduler.Wait(ticks.front());
++            ticks.pop_front();
++        }
++        Prepare(f);
++        const u32 w = f.render_width, h = f.render_height;
++        ffxDispatchDescUpscale d{};
++        d.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
++        d.commandList = reinterpret_cast<void*>(VkCommandBuffer(f.cmdbuf));
++        d.color = Resource(vk::Image(color), w, h, FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, false);
++        d.depth = Resource(vk::Image(depth), w, h, FFX_API_SURFACE_FORMAT_R32_FLOAT, false);
++        d.motionVectors =
++            Resource(f.motion.image, w, h, FFX_API_SURFACE_FORMAT_R16G16_FLOAT, false);
++        d.output = Resource(f.output.image, f.output.width, f.output.height,
++                            FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT, true);
++        d.jitterOffset = {f.jitter[0], f.jitter[1]};
++        d.motionVectorScale = {1.0f, 1.0f}; // render pixels
++        d.renderSize = {w, h};
++        d.upscaleSize = {f.output.width, f.output.height};
++        d.enableSharpening = f.sharpen && f.sharpness > 0.0f;
++        d.sharpness = f.sharpness;
++        d.frameTimeDelta = f.frame_ms;
++        d.preExposure = 1.0f;
++        d.reset = f.reset;
++        d.cameraNear = f.near_plane;
++        d.cameraFar = f.far_plane;
++        d.cameraFovAngleVertical = f.vertical_fov;
++        d.viewSpaceToMetersFactor = 1.0f;
++        Transition(f, true);
++        const auto rc = api->Dispatch(&context, &d.header);
++        Transition(f, false);
++        ticks.push_back(scheduler.CurrentTick());
++        if (rc != FFX_API_RETURN_OK) {
++            return Fail("dispatch failed (" + std::to_string(rc) + ")", false);
++        }
++        error.clear();
++        return true;
++    }
++};
++
++#else // no SDK 2.4 headers at build time (tools/fetch_fsr24.py) or not Windows
++
++bool Fsr412::Wanted(u32) {
++    return false;
++}
++
++struct Fsr412::Impl {
++    std::string error{"built without AMD's FSR SDK 2.4"};
++    bool fatal = true;
++    Impl(const Instance&, Scheduler&) {}
++    bool Record(const Fsr4Upscaler::Frame&) {
++        return false;
++    }
++    void Destroy(bool) {}
++};
++
++#endif
++
++Fsr412::Fsr412(const Instance& instance, Scheduler& scheduler)
++    : impl{std::make_unique<Impl>(instance, scheduler)} {}
++
++Fsr412::~Fsr412() = default;
++
++bool Fsr412::Record(const Fsr4Upscaler::Frame& frame) {
++    return impl->Record(frame);
++}
++
++void Fsr412::ReleaseWhileRecording() {
++    impl->Destroy(true);
++}
++
++const std::string& Fsr412::Error() const noexcept {
++    return impl->error;
++}
++
++bool Fsr412::Fatal() const noexcept {
++    return impl->fatal;
++}
++
++} // namespace Vulkan
+diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_fsr412.h b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr412.h
+new file mode 100644
+index 0000000..cf9ce4c
+--- /dev/null
++++ b/gpu/shadps4/video_core/renderer_vulkan/vk_fsr412.h
+@@ -0,0 +1,38 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++// FSR 4.1.2 through AMD's FSR SDK 2.4 (its signed amd_fidelityfx_upscaler_vk.dll in fsr24\ next
++// to the runtime; tools/fetch_fsr24.py). AMD lists Radeon RX 6000, 7000 and 9000 for it. When the
++// DLL is there, the FSR 4 choice uses it; without it (or BB_FSR412=0, or when AMD's provider is
++// not available on this GPU/driver) FSR 4 stays the v07 INT8 model of Fsr4Upscaler.
++
++#pragma once
++
++#include <memory>
++#include <string>
++#include "video_core/renderer_vulkan/vk_fsr4.h"
++
++namespace Vulkan {
++
++class Fsr412 {
++public:
++    /// AMD GPU, the SDK DLL next to the runtime and not turned off: the device gets the
++    /// features the SDK's shaders use (vk_instance) and FSR 4 tries 4.1.2 first.
++    static bool Wanted(u32 vendor_id);
++
++    Fsr412(const Instance& instance, Scheduler& scheduler);
++    ~Fsr412();
++
++    /// Same contract as Fsr4Upscaler::Record. False: Error() says why; Fatal() when 4.1.2
++    /// cannot run in this session (no provider, context creation failed).
++    bool Record(const Fsr4Upscaler::Frame& frame);
++    /// Frees the context while a frame's command buffer is being recorded.
++    void ReleaseWhileRecording();
++
++    [[nodiscard]] const std::string& Error() const noexcept;
++    [[nodiscard]] bool Fatal() const noexcept;
++
++private:
++    struct Impl;
++    std::unique_ptr<Impl> impl;
++};
++
++} // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
-index c707b15..5a77a9c 100644
+index c707b15..726fd3f 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
-@@ -13,6 +13,7 @@
+@@ -13,6 +13,8 @@
  #include "video_core/renderer_vulkan/liverpool_to_vk.h"
  #include "video_core/renderer_vulkan/vk_dlss.h"
  #include "video_core/renderer_vulkan/vk_instance.h"
++#include "video_core/renderer_vulkan/vk_fsr412.h"
 +#include "video_core/renderer_vulkan/vk_breadcrumbs.h"
  #include "video_core/renderer_vulkan/vk_platform.h"
  
  #include <vk_mem_alloc.h>
-@@ -210,37 +211,8 @@ void Instance::ReportDeviceLost(const char* where) const {
+@@ -210,37 +212,8 @@ void Instance::ReportDeviceLost(const char* where) const {
          return;
      }
      std::printf("GPU: device lost (%s)\n", where);
@@ -5489,16 +6158,17 @@ index c707b15..5a77a9c 100644
      std::fflush(stdout);
  }
  
-@@ -275,7 +247,7 @@ bool Instance::CreateDevice() {
+@@ -275,7 +248,8 @@ bool Instance::CreateDevice() {
          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR,
          vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR,
          vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
 -        vk::PhysicalDeviceFaultFeaturesEXT>();
-+        vk::PhysicalDeviceFaultFeaturesEXT, vk::PhysicalDeviceAddressBindingReportFeaturesEXT>();
++        vk::PhysicalDeviceFaultFeaturesEXT, vk::PhysicalDeviceAddressBindingReportFeaturesEXT,
++        vk::PhysicalDeviceCooperativeMatrixFeaturesKHR, vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
      features = feature_chain.get().features;
  
      const vk::StructureChain properties_chain = physical_device.getProperties2<
-@@ -334,6 +306,16 @@ bool Instance::CreateDevice() {
+@@ -334,6 +308,16 @@ bool Instance::CreateDevice() {
      // bbport: after a device loss the driver says where the GPU faulted (ReportDeviceLost).
      device_fault = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>().deviceFault &&
                     add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
@@ -5515,7 +6185,7 @@ index c707b15..5a77a9c 100644
      maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
      attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
      if (attachment_feedback_loop) {
-@@ -428,6 +410,7 @@ bool Instance::CreateDevice() {
+@@ -428,6 +412,7 @@ bool Instance::CreateDevice() {
              feature_chain.get<vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR>();
      }
      shader_clock = add_extension(VK_KHR_SHADER_CLOCK_EXTENSION_NAME);
@@ -5523,27 +6193,109 @@ index c707b15..5a77a9c 100644
      if (shader_clock) {
          shader_clock_features = feature_chain.get<vk::PhysicalDeviceShaderClockFeaturesKHR>();
          LOG_INFO(Render_Vulkan, "- shaderSubgroupClock: {}",
-@@ -638,6 +621,9 @@ bool Instance::CreateDevice() {
+@@ -435,6 +420,16 @@ bool Instance::CreateDevice() {
+     }
+     const bool calibrated_timestamps =
+         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
++    // bbport: FSR 4.1.2 (vk_fsr412): AMD's SDK shaders use these when the GPU has them.
++    // Cooperative matrices and Float8 are optional accelerators (RX 9000); RX 6000 runs without.
++    const bool fsr412 = Fsr412::Wanted(properties.vendorID);
++    const bool fsr412_cooperative =
++        fsr412 && feature_chain.get<vk::PhysicalDeviceCooperativeMatrixFeaturesKHR>().cooperativeMatrix &&
++        add_extension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
++    const auto float8_features = feature_chain.get<vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
++    const bool fsr412_float8 = fsr412_cooperative && float8_features.shaderFloat8 &&
++                               float8_features.shaderFloat8CooperativeMatrix &&
++                               add_extension(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
+ 
+     const auto family_properties = physical_device.getQueueFamilyProperties();
+     if (family_properties.empty()) {
+@@ -466,6 +461,17 @@ bool Instance::CreateDevice() {
+     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
+     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
+     vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
++    const bool fsr412_variable_pointers = fsr412 && vk11_features.variablePointersStorageBuffer;
++    const bool fsr412_memory_model = fsr412 && vk12_features.vulkanMemoryModel;
++    fsr412_device_ready = fsr412 && fsr412_variable_pointers && vk11_features.variablePointers &&
++                          fsr412_memory_model && vk12_features.vulkanMemoryModelDeviceScope &&
++                          vk12_features.descriptorBindingPartiallyBound &&
++                          vk13_features.computeFullSubgroups;
++    if (fsr412) {
++        std::printf("FSR 4.1.2: device features %s (cooperative matrix %d, float8 %d)\n",
++                    fsr412_device_ready ? "on" : "missing", int(fsr412_cooperative),
++                    int(fsr412_float8));
++    }
+     // bbport: DLSS (optional bridge DLL) needs its own device extensions on NVIDIA GPUs.
+     const size_t renderer_extension_count = enabled_extensions.size();
+     std::vector<const char*> dlss_extensions;
+@@ -522,6 +528,8 @@ bool Instance::CreateDevice() {
+         },
+         vk::PhysicalDeviceVulkan11Features{
+             .storageBuffer16BitAccess = vk11_features.storageBuffer16BitAccess,
++            .variablePointersStorageBuffer = fsr412_variable_pointers,
++            .variablePointers = fsr412_variable_pointers && vk11_features.variablePointers,
+             .shaderDrawParameters = vk11_features.shaderDrawParameters,
+         },
+         vk::PhysicalDeviceVulkan12Features{
+@@ -532,18 +540,24 @@ bool Instance::CreateDevice() {
+             .shaderSharedInt64Atomics = vk12_features.shaderSharedInt64Atomics,
+             .shaderFloat16 = vk12_features.shaderFloat16,
+             .shaderInt8 = vk12_features.shaderInt8,
++            .descriptorBindingPartiallyBound =
++                fsr412 && vk12_features.descriptorBindingPartiallyBound,
+             .scalarBlockLayout = vk12_features.scalarBlockLayout,
+             .uniformBufferStandardLayout = vk12_features.uniformBufferStandardLayout,
+             .separateDepthStencilLayouts = vk12_features.separateDepthStencilLayouts,
+             .hostQueryReset = vk12_features.hostQueryReset,
+             .timelineSemaphore = vk12_features.timelineSemaphore,
+             .bufferDeviceAddress = vk12_features.bufferDeviceAddress,
++            .vulkanMemoryModel = fsr412_memory_model,
++            .vulkanMemoryModelDeviceScope =
++                fsr412_memory_model && vk12_features.vulkanMemoryModelDeviceScope,
+             .shaderOutputLayer = vk12_features.shaderOutputLayer,
+         },
+         vk::PhysicalDeviceVulkan13Features{
+             .robustImageAccess = vk13_features.robustImageAccess,
+             .shaderDemoteToHelperInvocation = vk13_features.shaderDemoteToHelperInvocation,
+             .subgroupSizeControl = vk13_features.subgroupSizeControl,
++            .computeFullSubgroups = fsr412 && vk13_features.computeFullSubgroups,
+             .synchronization2 = vk13_features.synchronization2,
+             .dynamicRendering = vk13_features.dynamicRendering,
+             .shaderIntegerDotProduct = vk13_features.shaderIntegerDotProduct,
+@@ -638,6 +652,16 @@ bool Instance::CreateDevice() {
          vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE{
              .shaderMixedFloatDotProductFloat16AccFloat32 = true,
          },
 +        vk::PhysicalDeviceAddressBindingReportFeaturesEXT{
 +            .reportAddressBinding = true,
 +        },
++        vk::PhysicalDeviceCooperativeMatrixFeaturesKHR{
++            .cooperativeMatrix = true,
++        },
++        vk::PhysicalDeviceShaderFloat8FeaturesEXT{
++            .shaderFloat8 = true,
++            .shaderFloat8CooperativeMatrix = true,
++        },
      };
  
      if (!custom_border_color) {
-@@ -701,6 +687,9 @@ bool Instance::CreateDevice() {
+@@ -701,6 +725,15 @@ bool Instance::CreateDevice() {
      if (!mixed_float_dot_product) {
          device_chain.unlink<vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>();
      }
 +    if (!address_binding_report) {
 +        device_chain.unlink<vk::PhysicalDeviceAddressBindingReportFeaturesEXT>();
 +    }
++    if (!fsr412_cooperative) {
++        device_chain.unlink<vk::PhysicalDeviceCooperativeMatrixFeaturesKHR>();
++    }
++    if (!fsr412_float8) {
++        device_chain.unlink<vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
++    }
  
      auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
      if (device_result != vk::Result::eSuccess && enabled_extensions.size() > renderer_extension_count) {
-@@ -766,6 +755,7 @@ bool Instance::CreateDevice() {
+@@ -766,6 +799,7 @@ bool Instance::CreateDevice() {
      }
  
      CreateAllocator();
@@ -5552,7 +6304,7 @@ index c707b15..5a77a9c 100644
  }
  
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
-index 8c97d25..fc1f78d 100644
+index 8c97d25..cc334f9 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
 @@ -3,6 +3,7 @@
@@ -5563,9 +6315,15 @@ index 8c97d25..fc1f78d 100644
  #include <span>
  #include <unordered_map>
  
-@@ -298,15 +299,55 @@ public:
+@@ -297,16 +298,61 @@ public:
+     /// Returns true when the shaderSubgroupClock feature of
      /// bbport: the FSR 4 v07 INT8/DOT4 shaders can run (Float16, Int8, Int16, packed int8 dot
      /// products, linear compute derivatives, extended storage image formats).
++    /// FSR 4.1.2: the device was created with the features AMD's FSR SDK uses (vk_fsr412).
++    bool IsFsr412DeviceReady() const {
++        return fsr412_device_ready;
++    }
++
      bool IsFsr4Int8Supported() const {
 +        // DCport: Intel Arc never finished setting up the INT8 model (no error, the game stops
 +        // after "FSR 4 inputs"); FSR 3.1 is used there. BB_FSR4_INTEL=1 tries it anyway.
@@ -5621,15 +6379,19 @@ index 8c97d25..fc1f78d 100644
      }
  
      /// VK_KHR_shader_clock is supported.
-@@ -589,6 +630,8 @@ private:
+@@ -589,8 +635,11 @@ private:
      bool image_2d_view_of_3d{};
      bool image_view_min_lod{};
      bool shader_clock{};
 +    bool amd_buffer_marker{};
 +    bool address_binding_report{};
      bool compute_shader_derivatives{};
-     bool mixed_float_dot_product{}; // bbport: VK_VALVE_shader_mixed_float_dot_product (FSR 4.1.1)
+-    bool mixed_float_dot_product{}; // bbport: VK_VALVE_shader_mixed_float_dot_product (FSR 4.1.1)
++    bool mixed_float_dot_product{};
++    bool fsr412_device_ready{}; // bbport: VK_VALVE_shader_mixed_float_dot_product (FSR 4.1.1)
      bool supports_memory_budget{};
+     bool supports_block_texel_view{};
+     u64 total_memory_budget{};
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_object_motion.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_object_motion.cpp
 index 7203c54..c480c8a 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_object_motion.cpp
@@ -17449,7 +18211,7 @@ index 3a73ecf..b4d19f7 100644
      g_window_thread = std::thread([title, width, height] {
          Common::SetCurrentThreadName("bb:window");
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 651b74e..9078f62 100644
+index 651b74e..c5b78ea 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
 @@ -9,10 +9,12 @@
@@ -17873,7 +18635,7 @@ index 651b74e..9078f62 100644
 -                : s.upscaler == BbSettings::UpscalerDlss ? "DLSS"
 -                                                         : "");
 +    const char* upscaler = s.upscaler == BbSettings::UpscalerFsr3     ? "FSR 3.1"
-+                           : s.upscaler == BbSettings::UpscalerFsr4   ? "FSR 4"
++                           : s.upscaler == BbSettings::UpscalerFsr4   ? (s.fsr412_active ? "FSR 4.1.2" : "FSR 4")
 +                           : s.upscaler == BbSettings::UpscalerFsr411 ? "FSR 4.1.1"
 +                           : s.upscaler == BbSettings::UpscalerTaa    ? "TAA"
 +                           : s.upscaler == BbSettings::UpscalerDlss   ? "DLSS"
@@ -18667,7 +19429,7 @@ index 5b985a4..f86598a 100644
  }
  
 diff --git a/gpu/shim/bbport_settings.h b/gpu/shim/bbport_settings.h
-index c0e7334..2200377 100644
+index c0e7334..e758765 100644
 --- a/gpu/shim/bbport_settings.h
 +++ b/gpu/shim/bbport_settings.h
 @@ -84,10 +84,18 @@ struct Values {
@@ -18689,6 +19451,15 @@ index c0e7334..2200377 100644
      // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.
      std::atomic<bool> fsr4_auto_exposure{true};
      std::atomic<bool> fsr4_invert_jitter{false};
+@@ -106,6 +114,8 @@ struct Values {
+     std::atomic<int> live_resolution{0};
+     /// Why FSR 4 cannot run (assets, device features), or null. Set by the renderer.
+     std::atomic<const char*> fsr4_problem{nullptr};
++    /// FSR 4 runs as AMD's FSR 4.1.2 (vk_fsr412), not the v07 model: the FPS counter says so.
++    std::atomic<bool> fsr412_active{false};
+     std::atomic<bool> fsr4_supported{false}, fsr411_supported{false};
+     /// DLSS (bbport_dlss.dll, NVIDIA RTX) is ready, or why not (null before the device exists).
+     std::atomic<bool> dlss_supported{false};
 diff --git a/gpu/shim/bbport_toggles.h b/gpu/shim/bbport_toggles.h
 index 57a9486..0fe1416 100644
 --- a/gpu/shim/bbport_toggles.h
@@ -22417,6 +23188,104 @@ index 0000000..b66b116
 +    puts("PASS: trophies persist across restarts");
 +    return 0;
 +}
+diff --git a/tools/build_cpu_compat.py b/tools/build_cpu_compat.py
+index 20883fe..361a0ae 100644
+--- a/tools/build_cpu_compat.py
++++ b/tools/build_cpu_compat.py
+@@ -600,6 +600,9 @@ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument('game', type=Path, help='Plaintext game directory, read only')
+     parser.add_argument('--out', type=Path, default=PORT / 'tools/legacy-cpu-plan.json')
++    # DCport: the modules linked into the image, relative to sce_module/ (Driveclub:
++    # libc.prx libSceFios2.prx ../libtbb.prx ../logiWheel.prx ../iksemelGNMm.prx).
++    parser.add_argument('--modules', nargs='+', default=['libc.prx', 'libSceFios2.prx'])
+     args = parser.parse_args()
+     game = args.game
+     plan = {'version': 4, 'modules': {}, 'sites': [], 'unhandled': [], 'coverage': {}}
+@@ -607,12 +610,15 @@ def main():
+     detailed = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+     detailed.detail = True
+     seen = set()
+-    for name, path in [('eboot.bin', game / 'eboot.bin'), ('libc.prx', game / 'sce_module/libc.prx'),
+-                       ('libSceFios2.prx', game / 'sce_module/libSceFios2.prx')]:
++    for name, path in [('eboot.bin', game / 'eboot.bin')] + [
++            (Path(m).name, game / 'sce_module' / m) for m in args.modules]:
+         mod = module(path)
+         plan['modules'][name] = mod['sha256']
+         entry_evidence = None
+-        if name == 'eboot.bin':
++        # DCport: the D015 count spans are Bloodborne's eboot only; other games' eboots (Driveclub,
++        # same libc and libSceFios2) get the general instruction and short-span translations.
++        count_spans = name == 'eboot.bin' and mod['sha256'] == COUNT_SPAN_MODULE_SHA256
++        if count_spans:
+             entry_report = audit_count_span_entries(mod)
+             evidence_path = PORT / COUNT_SPAN_EVIDENCE_REFERENCE
+             evidence_path.parent.mkdir(parents=True, exist_ok=True)
+@@ -638,7 +644,7 @@ def main():
+                 # strlen already has its guarded whole-function replacement.
+                 if name == 'libc.prx' and 0x2f970 <= address < 0x2fa50:
+                     continue
+-                if name == 'eboot.bin' and address in COUNT_SPANS:
++                if count_spans and address in COUNT_SPANS:
+                     plan['sites'].append(count_span_site(mod, address, entry_evidence))
+                     continue
+                 if length < 5:
+diff --git a/tools/fetch_fsr24.py b/tools/fetch_fsr24.py
+new file mode 100644
+index 0000000..dc981fb
+--- /dev/null
++++ b/tools/fetch_fsr24.py
+@@ -0,0 +1,50 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-or-later
++"""Fetches AMD FSR SDK 2.4.0 files for FSR 4.1.2 into fsr24/ (git-ignored, never committed).
++
++fsr24/sdk/...                          headers the build needs (vk_fsr412.cpp)
++fsr24/amd_fidelityfx_upscaler_vk.dll   AMD's signed upscaler, shipped in bin/fsr24/ of FSR editions
++fsr24/AMD-FSR-SDK-LICENSE.md           AMD's license, shipped next to it
++"""
++import hashlib
++import sys
++import urllib.request
++from pathlib import Path
++
++COMMIT = "7539ae8b6568ad29ed78a753404351daf3b5cca7"  # SDK v2.4.0
++BASE = f"https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/{COMMIT}/"
++KIT = "Kits/FidelityFX/"
++FILES = {
++    "sdk/api/include/ffx_api.h": KIT + "api/include/ffx_api.h",
++    "sdk/api/include/ffx_api_types.h": KIT + "api/include/ffx_api_types.h",
++    "sdk/api/include/ffx_api_loader.h": KIT + "api/include/ffx_api_loader.h",
++    "sdk/api/include/vk/ffx_api_vk.h": KIT + "api/include/vk/ffx_api_vk.h",
++    "sdk/upscalers/include/ffx_upscale.h": KIT + "upscalers/include/ffx_upscale.h",
++    "AMD-FSR-SDK-LICENSE.md": "docs/license.md",
++    "amd_fidelityfx_upscaler_vk.dll": KIT + "signedbin/amd_fidelityfx_upscaler_vk.dll",
++}
++PINNED = {"amd_fidelityfx_upscaler_vk.dll":
++          "4a7e895af6e0b615d40a84d59eb8c2b1054ad91cdd0c739567940270d51bdab7"}
++
++
++def main() -> int:
++    out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[1] / "fsr24"
++    for name, source in FILES.items():
++        target = out / name
++        if target.is_file() and (name not in PINNED or
++                                 hashlib.sha256(target.read_bytes()).hexdigest() == PINNED[name]):
++            continue
++        with urllib.request.urlopen(BASE + source, timeout=120) as response:
++            data = response.read()
++        if name in PINNED and hashlib.sha256(data).hexdigest() != PINNED[name]:
++            print(f"fetch_fsr24: {name} does not match the pinned SDK 2.4.0 file", file=sys.stderr)
++            return 1
++        target.parent.mkdir(parents=True, exist_ok=True)
++        target.write_bytes(data)
++        print(f"fetch_fsr24: {name} ({len(data)} bytes)")
++    print(f"fetch_fsr24: SDK 2.4.0 files ready in {out}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
 diff --git a/tools/fsr4cap/extract.py b/tools/fsr4cap/extract.py
 index 3e4c88f..6e4d9c6 100644
 --- a/tools/fsr4cap/extract.py
