@@ -26,7 +26,8 @@ from link_modules import module
 from cpu_compat import (atomic_output, COUNT_SPANS, COUNT_SPAN_MODULE_SHA256,
                         COUNT_SPAN_FUNCTION, COUNT_SPAN_EVIDENCE_REFERENCE, COUNT_SPAN_EVIDENCE_SHA256)
 
-SUPPORTED = {'andn', 'bextr', 'blsr', 'blsi', 'blsmsk', 'tzcnt', 'lzcnt', 'movbe'}
+SUPPORTED = {'andn', 'bextr', 'blsr', 'blsi', 'blsmsk', 'tzcnt', 'lzcnt', 'movbe', 'vcvtps2ph', 'vcvtph2ps'}
+F16C = {'vcvtps2ph', 'vcvtph2ps'}  # also looked for in leaf functions without unwind records
 ASSEMBLER = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_64)
 CACHE = {}
 
@@ -94,6 +95,55 @@ def movbe_body(operands):
     return bytes(ASSEMBLER.asm('; '.join(lines))[0])
 
 
+def f16c_body(mnemonic, operands):
+    """F16C VCVTPS2PH / VCVTPH2PS, register 128-bit forms: the four lanes converted in integer
+    code (round to nearest even, NaNs quieted as F16C does). Every register and flag but the
+    destination is kept, below the preserved red zone; the destination's upper bits are zeroed
+    like a VEX.128 write."""
+    args = operands.split(', ')
+    registers = [a for a in args if re.fullmatch(r'xmm(?:1[0-5]|[0-9])', a)]
+    if mnemonic == 'vcvtps2ph':
+        if len(args) != 3 or len(registers) != 2 or args[2] not in ('0', '4', '0x0', '0x4'):
+            raise ValueError('Only register VCVTPS2PH with round-to-nearest is supported.')
+    elif len(args) != 2 or len(registers) != 2:
+        raise ValueError('Only register VCVTPH2PS is supported.')
+    destination, source = args[0], args[1]
+    lines = ['lea rsp, [rsp-128]', 'pushfq', 'push rax', 'push rcx', 'push rdx', 'push r8', 'push r9',
+             'sub rsp, 32', 'vmovdqu xmmword ptr [rsp], ' + source,
+             'mov qword ptr [rsp+24], 0', 'xor r9d, r9d', 'lane:']
+    if mnemonic == 'vcvtph2ps':
+        lines += ['movzx eax, word ptr [rsp+r9*2]', 'mov edx, eax', 'and edx, 0x8000', 'shl edx, 16',
+                  'mov r8d, eax', 'and r8d, 0x7c00', 'and eax, 0x3ff',
+                  'cmp r8d, 0x7c00', 'je special', 'test r8d, r8d', 'jz small',
+                  'shr r8d, 10', 'add r8d, 112', 'shl r8d, 23', 'shl eax, 13', 'or eax, r8d', 'jmp store',
+                  'special:', 'shl eax, 13', 'jz infinity', 'or eax, 0x400000',
+                  'infinity:', 'or eax, 0x7f800000', 'jmp store',
+                  'small:', 'test eax, eax', 'jz store',
+                  'bsr r8d, eax', 'mov ecx, 23', 'sub ecx, r8d', 'shl eax, cl', 'and eax, 0x7fffff',
+                  'add r8d, 103', 'shl r8d, 23', 'or eax, r8d',
+                  'store:', 'or eax, edx', 'mov dword ptr [rsp+16+r9*4], eax']
+    else:
+        lines += ['mov eax, dword ptr [rsp+r9*4]', 'mov edx, eax', 'shr edx, 16', 'and edx, 0x8000',
+                  'and eax, 0x7fffffff', 'cmp eax, 0x7f800000', 'ja nan', 'cmp eax, 0x477ff000',
+                  'jae infinity', 'cmp eax, 0x38800000', 'jb small',
+                  'mov r8d, eax', 'shr r8d, 13', 'and r8d, 1', 'add eax, 0xc8000fff', 'add eax, r8d',
+                  'shr eax, 13', 'jmp store',
+                  'nan:', 'shr eax, 13', 'and eax, 0x3ff', 'or eax, 0x7e00', 'jmp store',
+                  'infinity:', 'mov eax, 0x7c00', 'jmp store',
+                  'small:', 'cmp eax, 0x33000000', 'jbe zero',
+                  'mov ecx, eax', 'shr ecx, 23', 'neg ecx', 'add ecx, 126',
+                  'mov r8d, eax', 'and r8d, 0x7fffff', 'or r8d, 0x800000',
+                  'mov eax, r8d', 'shr eax, cl', 'and eax, 1', 'lea r8d, [r8+rax-1]',
+                  'dec cl', 'mov eax, 1', 'shl eax, cl', 'inc cl', 'add r8d, eax', 'shr r8d, cl',
+                  'mov eax, r8d', 'jmp store',
+                  'zero:', 'xor eax, eax',
+                  'store:', 'or eax, edx', 'mov word ptr [rsp+16+r9*2], ax']
+    lines += ['inc r9d', 'cmp r9d, 4', 'jne lane', 'vmovdqu ' + destination + ', xmmword ptr [rsp+16]',
+              'add rsp, 32', 'pop r9', 'pop r8', 'pop rdx', 'pop rcx', 'pop rax', 'popfq',
+              'lea rsp, [rsp+128]']
+    return bytes(ASSEMBLER.asm('; '.join(lines))[0])
+
+
 def body(mnemonic, operands):
     key = mnemonic, operands
     if key in CACHE:
@@ -102,6 +152,9 @@ def body(mnemonic, operands):
         raise ValueError('Unsupported instruction.')
     if mnemonic == 'movbe':
         CACHE[key] = movbe_body(operands)
+        return CACHE[key]
+    if mnemonic in ('vcvtps2ph', 'vcvtph2ps'):
+        CACHE[key] = f16c_body(mnemonic, operands)
         return CACHE[key]
     args = operands.split(', ')
     if len(args) != (3 if mnemonic in ('andn', 'bextr') else 2):
@@ -598,6 +651,50 @@ def add_short_spans(mod, name, candidates, plan):
                                       'reason': short_reason(mnemonic, failures.get(address, 'no span'))})
 
 
+def add_site(name, mod, detailed, plan, address, length, mnemonic, operands):
+    """A site for an instruction of five bytes or more: it becomes a jump to its translation."""
+    try:
+        replacement = body(mnemonic, operands)
+        at = file_offset(mod, address, length, executable=True)
+        instruction = next(detailed.disasm(bytes(mod['elf'][at:at+length]), address))
+        fixups = rip_fixups(instruction, replacement)
+    except ValueError as error:
+        plan['unhandled'].append({'module': name, 'address': hex(address), 'instruction': mnemonic + ' ' + operands,
+                                  'reason': str(error)})
+        return
+    plan['sites'].append({'module': name, 'address': address, 'bytes': bytes(mod['elf'][at:at+length]).hex(),
+                          'body': replacement.hex(), 'instruction': mnemonic + ' ' + operands,
+                          'rip_fixups': fixups})
+
+
+def gap_functions(mod, functions):
+    """Leaf functions between the declared ones that have no unwind record (DRIVECLUB's
+    half-float helpers): after the alignment padding that follows a function, code at a 16-byte
+    boundary that decodes without a gap up to a `ret`. Only F16C sites are taken from them."""
+    decoder = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    found = []
+    for (start, size), (following, _) in zip(functions, functions[1:]):
+        end = start + size
+        if not 0 < following - end <= 256:
+            continue
+        try:
+            at = file_offset(mod, end, following - end, executable=True)
+        except StopIteration:
+            continue
+        rows = list(decoder.disasm_lite(bytes(mod['elf'][at:at + following - end]), end))
+        index = 0
+        while index < len(rows) and rows[index][2] in ('nop', 'int3'):
+            index += 1
+        last = index
+        while last < len(rows) and rows[last][2] not in ('ret', 'retq'):
+            last += 1
+        code_start = rows[index][0] if index < len(rows) else following
+        if last >= len(rows) or index == 0 or code_start % 16:
+            continue
+        found.append((code_start, rows[last][0] + rows[last][1] - code_start))
+    return found
+
+
 def build(game, out, modules):
     """Writes the plan for `game`'s eboot.bin and `modules` (relative to sce_module/) to `out`."""
     game, out = Path(game), Path(out)
@@ -648,18 +745,7 @@ def build(game, out, modules):
                     # kept only if the entry audit finds no way into the moved ones.
                     short_candidates.append((rows, row_index, (start, start + size)))
                     continue
-                try:
-                    replacement = body(mnemonic, operands)
-                    at = file_offset(mod, address, length, executable=True)
-                    instruction = next(detailed.disasm(bytes(mod['elf'][at:at+length]), address))
-                    fixups = rip_fixups(instruction, replacement)
-                except ValueError as error:
-                    plan['unhandled'].append({'module': name, 'address': hex(address), 'instruction': mnemonic + ' ' + operands,
-                                              'reason': str(error)})
-                    continue
-                plan['sites'].append({'module': name, 'address': address, 'bytes': bytes(mod['elf'][at:at+length]).hex(),
-                                      'body': replacement.hex(), 'instruction': mnemonic + ' ' + operands,
-                                      'rip_fixups': fixups})
+                add_site(name, mod, detailed, plan, address, length, mnemonic, operands)
             remaining = start + size - decoded_end
             coverage['fully_decoded_functions' if not remaining else 'partial_functions'] += 1
             coverage['undecoded_bytes'] += remaining
@@ -670,6 +756,12 @@ def build(game, out, modules):
                                   'functions_done': index + 1, 'functions_total': len(functions), 'sites': len(plan['sites'])}), flush=True)
                 report_time = time.monotonic()
         plan['coverage'][name] = coverage
+        for start, size in gap_functions(mod, functions):
+            at = file_offset(mod, start, size, executable=True)
+            for address, length, mnemonic, operands in decoder.disasm_lite(bytes(mod['elf'][at:at + size]), start):
+                if mnemonic in F16C and (name, address) not in seen:
+                    seen.add((name, address))
+                    add_site(name, mod, detailed, plan, address, length, mnemonic, operands)
         add_short_spans(mod, name, short_candidates, plan)
     target = out
     with atomic_output(target) as stream:

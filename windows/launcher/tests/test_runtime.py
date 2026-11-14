@@ -107,6 +107,16 @@ def test_ui_fit_setting(tmp_path):
         assert e.get("BB_DC_UI_FIT") == expected
 
 
+def test_wheel_settings(tmp_path):
+    paths = AppPaths.for_root(tmp_path)
+    paths.ini.parent.mkdir(parents=True, exist_ok=True)
+    paths.ini.write_text("wheel=G923" + chr(10) + "wheel_axes=0,2,3,1" + chr(10) + "wheel_ffb=60" + chr(10),
+                         encoding="utf-8")
+    e = game_env(paths, LauncherSettings(), fsr=True, base={"BB_WHEEL_BUTTONS": "stale"})
+    assert (e["BB_WHEEL"], e["BB_WHEEL_AXES"], e["BB_WHEEL_FFB"]) == ("G923", "0,2,3,1", "60")
+    assert "BB_WHEEL_BUTTONS" not in e and "BB_WHEEL_FFB_INVERT" not in e
+
+
 def test_language(tmp_path):
     paths = AppPaths.for_root(tmp_path)
     paths.ini.parent.mkdir(parents=True, exist_ok=True)

@@ -16461,7 +16461,7 @@ index 0a2fea3..47435e6 100644
  
      for (vk::Semaphore& semaphore : image_acquired) {
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
-index 7c2da3f..9084f1f 100644
+index 7c2da3f..6e96ec2 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_temporal_upscaler.cpp
 @@ -7,6 +7,7 @@
@@ -16481,7 +16481,15 @@ index 7c2da3f..9084f1f 100644
  #include "video_core/host_shaders/upscale_merge_comp.h"
  #include "video_core/host_shaders/upscale_reactive_comp.h"
  #include "video_core/host_shaders/taa_comp.h"
-@@ -170,13 +173,20 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
+@@ -164,19 +167,26 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
+     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_},
+       runtime{runtime_}, camera_motion{camera_motion_}, scene_targets{scene_targets_} {
+     // Reject unsupported shaders before allocating resources or recording a frame.
+-    BbSettings::ConfigureUpscalerSupport(instance.IsFsr4Int8Supported(),
+-                                         instance.IsFsr411Supported());
++    // DCport: no FSR 4.1.1 any more; FSR 4 runs AMD's FSR 4.1.2 where the driver offers it.
++    BbSettings::ConfigureUpscalerSupport(instance.IsFsr4Int8Supported(), false);
+     fsr4 = std::make_unique<Fsr4Upscaler>(instance, scheduler);
      {
          const Dlss* dlss = Dlss::Get();
          static std::string problem;
@@ -18211,7 +18219,7 @@ index 3a73ecf..b4d19f7 100644
      g_window_thread = std::thread([title, width, height] {
          Common::SetCurrentThreadName("bb:window");
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
-index 651b74e..c5b78ea 100644
+index 651b74e..c467dee 100644
 --- a/gpu/shim/bbport_overlay.cpp
 +++ b/gpu/shim/bbport_overlay.cpp
 @@ -9,10 +9,12 @@
@@ -18235,7 +18243,7 @@ index 651b74e..c5b78ea 100644
  float base_scale = 1.0f;
  
  // Present rate for the FPS counter.
-@@ -187,19 +190,30 @@ void Menu() {
+@@ -187,20 +190,34 @@ void Menu() {
          ImVec2(0.0f, 0.0f),
          ImVec2(FLT_MAX, std::max(viewport->WorkSize.y - 60.0f * base_scale, 200.0f * base_scale)));
      bool keep_open = true;
@@ -18248,6 +18256,9 @@ index 651b74e..c5b78ea 100644
      ImGui::Text("%s", FpsText().c_str());
  
 -    ImGui::SeparatorText("Temporal upscaling");
+-    static const char* upscalers[] = {"Off", "FSR 3.1", "FSR 4 (INT8)", "FSR 4.1.1 (INT8)",
+-                                     "TAA (native anti-aliasing)", "DLSS (NVIDIA RTX)"};
+-    static const char* later[] = {"XeSS"};
 +    // DCport without FSR (BB_UPSCALER=none): no upscaler, preset or output resolution options.
 +    static const bool no_upscaler = [] {
 +        const char* env = std::getenv("BB_UPSCALER");
@@ -18261,16 +18272,19 @@ index 651b74e..c5b78ea 100644
 +    }();
 +    if (!no_upscaler) {
 +    ImGui::SeparatorText(dc_menu ? "Anti-aliasing" : "Temporal upscaling");
-     static const char* upscalers[] = {"Off", "FSR 3.1", "FSR 4 (INT8)", "FSR 4.1.1 (INT8)",
-                                      "TAA (native anti-aliasing)", "DLSS (NVIDIA RTX)"};
--    static const char* later[] = {"XeSS"};
++    const char* upscalers[] = {"Off", "FSR 3.1", s.fsr412_active ? "FSR 4.1.2" : "FSR 4 (INT8)",
++                               "FSR 4.1.1 (INT8)", "TAA (native anti-aliasing)",
++                               "DLSS (NVIDIA RTX)"};
      int upscaler = s.upscaler;
 -    if (ImGui::BeginCombo("Upscaler", upscalers[upscaler])) {
 +    if (ImGui::BeginCombo(dc_menu ? "Anti-aliasing" : "Upscaler", upscalers[upscaler])) {
          for (int i = 0; i < BbSettings::UpscalerCount; ++i) {
++            if (i == BbSettings::UpscalerFsr411 && !s.fsr411_supported.load())
++                continue; // DCport: FSR 4.1.1 removed
              const bool supported = i == BbSettings::UpscalerFsr4 ? s.fsr4_supported.load()
                  : i == BbSettings::UpscalerFsr411 ? s.fsr411_supported.load()
-@@ -214,15 +228,37 @@ void Menu() {
+                 : i == BbSettings::UpscalerDlss   ? s.dlss_supported.load() : true;
+@@ -214,15 +231,37 @@ void Menu() {
                  ImGui::TextDisabled("- unsupported by this GPU");
              }
          }
@@ -18315,12 +18329,14 @@ index 651b74e..c5b78ea 100644
      if (const char* problem = s.dlss_problem.load(); problem && upscaler == BbSettings::UpscalerDlss) {
          ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "DLSS: %s", problem);
      }
-@@ -235,17 +271,22 @@ void Menu() {
+@@ -235,17 +274,24 @@ void Menu() {
      }
      if (BbSettings::IsFsr4(s.upscaler)) {
          if (s.upscaler == BbSettings::UpscalerFsr411) {
 -            Hint("FSR 4.1.1 INT8: AMD 4.1.1 DLL model reproduced in Vulkan. One model covers Native through Performance, with another for Ultra Performance. Assets: tools/fsr4cap/build_assets.sh (requires the DLL and Proton).");
 +            Hint("FSR 4.1.1 INT8: AMD 4.1.1 DLL model reproduced in Vulkan. One model covers Native through Performance, with another for Ultra Performance. Set it up once in the launcher (SETUP, Set up FSR 4.1.1) from your own amd_fidelityfx_upscaler_dx12.dll.");
++        } else if (s.fsr412_active) {
++            Hint("FSR 4.1.2: AMD's own FSR 4.1.2 (FSR SDK 2.4) through the graphics driver, on Radeon RX 6000, 7000 and 9000. Higher quality than FSR 3.1, with more GPU work.");
          } else {
 -            Hint("FSR 4 INT8 uses the v07 model from the AMD FidelityFX SDK. Higher quality than FSR 3.1, with more GPU work. Changing presets rebuilds the model and may pause briefly. Assets: tools/fetch_fsr4_assets.sh.");
 +            Hint("FSR 4 INT8 uses the v07 model from the AMD FidelityFX SDK. Higher quality than FSR 3.1, with more GPU work. Its files come with the FSR edition (fsr4_shaders folder).");
@@ -18340,7 +18356,7 @@ index 651b74e..c5b78ea 100644
      ImGui::BeginDisabled(taa);
      int preset = taa ? BbSettings::NativeAA : s.preset.load();
      char preset_label[64];
-@@ -283,6 +324,7 @@ void Menu() {
+@@ -283,6 +329,7 @@ void Menu() {
      } else {
          Hint("Native AA uses the upscaler for anti-aliasing. Other presets reduce scene resolution relative to the output. The HUD is drawn at output resolution. Preset changes apply on the next frame in a live session.");
      }
@@ -18348,7 +18364,7 @@ index 651b74e..c5b78ea 100644
      Checkbox("Sharpening (RCAS)", s.sharpen);
      ImGui::BeginDisabled(!s.sharpen);
      Slider("Sharpness", s.sharpness, 0.0f, 2.0f);
-@@ -305,8 +347,10 @@ void Menu() {
+@@ -305,8 +352,10 @@ void Menu() {
      }
      ImGui::EndDisabled();
      ImGui::EndDisabled();
@@ -18359,7 +18375,7 @@ index 651b74e..c5b78ea 100644
      bool show_motion = s.debug_view == BbSettings::DebugMotion;
      if (ImGui::Checkbox("Show motion vectors (debug)", &show_motion)) {
          s.debug_view = show_motion ? BbSettings::DebugMotion : BbSettings::DebugNone;
-@@ -315,57 +359,88 @@ void Menu() {
+@@ -315,57 +364,88 @@ void Menu() {
      ImGui::EndDisabled(); // upscaler off
  
      ImGui::SeparatorText("Frame generation");
@@ -18493,7 +18509,7 @@ index 651b74e..c5b78ea 100644
      ImGui::SeparatorText("Output resolution");
      static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160",
                                      "2560 x 1080 (21:9)", "3440 x 1440 (21:9)",
-@@ -404,6 +479,10 @@ void Menu() {
+@@ -404,6 +484,10 @@ void Menu() {
          ImGui::EndCombo();
      }
      Hint("On: output and presets change without restarting, while game post-processing stays at 1080p. Off: the scene is patched to the preset resolution at startup. Auto enables the live path on capable discrete GPUs. Changes apply after restarting the game.");
@@ -18504,7 +18520,7 @@ index 651b74e..c5b78ea 100644
      ImGui::SeparatorText("Game effects (restart required)");
      static const char* lods[] = {"Highest (-2)", "Original", "Lower (1)", "Lowest (2)"};
      static constexpr int lod_values[] = {-2, 0, 1, 2};
-@@ -428,6 +507,7 @@ void Menu() {
+@@ -428,6 +512,7 @@ void Menu() {
      }
      Hint("Effects are applied through game patches at startup (patches/Bloodborne.xml). Motion blur and dynamic shadows can increase GPU load.");
      Hint("Free camera: hold Cross and press L3 (keyboard: Space + Z). Debug menu: left touchpad / Tab. Requires DbgFont14h.ccm and DbgFont14h.tpf in dvdroot_ps4/font from the debug-font mod. Right touchpad: Backspace.");
@@ -18512,7 +18528,7 @@ index 651b74e..c5b78ea 100644
  
      bool restart = s.object_motion != s.startup_object_motion ||
                     s.model_lod != s.startup_model_lod || s.fov != s.startup_fov ||
-@@ -436,15 +516,33 @@ void Menu() {
+@@ -436,15 +521,33 @@ void Menu() {
      for (int e = 0; e < BbSettings::EffectCount; ++e) {
          restart |= s.effects[e] != s.startup_effects[e];
      }
@@ -18547,7 +18563,7 @@ index 651b74e..c5b78ea 100644
      ImGui::SeparatorText("Other");
      Checkbox("Show FPS counter", s.show_fps);
      Checkbox("Mute when the game is in the background", s.mute_unfocused);
-@@ -457,7 +555,27 @@ void Menu() {
+@@ -457,7 +560,27 @@ void Menu() {
          }
          ImGui::EndCombo();
      }
@@ -18576,7 +18592,7 @@ index 651b74e..c5b78ea 100644
  
      ImGui::Spacing();
      if (ImGui::Button("Close")) {
-@@ -472,9 +590,12 @@ void Menu() {
+@@ -472,9 +595,12 @@ void Menu() {
      // focus at the first press, which disarmed it at once.
      if (ImGui::Button(quit_armed ? "Press again to quit###bb_quit" : "Quit game###bb_quit")) {
          if (quit_armed) {
@@ -18589,7 +18605,7 @@ index 651b74e..c5b78ea 100644
          }
          quit_armed = !quit_armed;
      }
-@@ -482,7 +603,7 @@ void Menu() {
+@@ -482,7 +608,7 @@ void Menu() {
          quit_armed = false;
      }
      ImGui::SameLine();
@@ -18598,7 +18614,7 @@ index 651b74e..c5b78ea 100644
      ImGui::End();
      if (!keep_open) {
          SetOpen(false);
-@@ -513,6 +634,24 @@ void TextEntryBox() {
+@@ -513,6 +639,24 @@ void TextEntryBox() {
      ImGui::End();
  }
  
@@ -18623,7 +18639,7 @@ index 651b74e..c5b78ea 100644
  void FpsCounter() {
      const ImGuiViewport* viewport = ImGui::GetMainViewport();
      const float pad = 12.0f * base_scale;
-@@ -525,13 +664,32 @@ void FpsCounter() {
+@@ -525,13 +669,32 @@ void FpsCounter() {
                       ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                       ImGuiWindowFlags_NoFocusOnAppearing);
      const auto& s = BbSettings::Get();
@@ -18663,7 +18679,7 @@ index 651b74e..c5b78ea 100644
      ImGui::End();
  }
  
-@@ -548,14 +706,54 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
+@@ -548,14 +711,54 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count)
      io.IniFilename = nullptr; // window positions are not kept
      io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
      io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -18720,7 +18736,7 @@ index 651b74e..c5b78ea 100644
  
      ImFontConfig font_config;
      font_config.FontDataOwnedByAtlas = false;
-@@ -703,13 +901,17 @@ bool HandleEvent(const SDL_Event& event) {
+@@ -703,13 +906,17 @@ bool HandleEvent(const SDL_Event& event) {
  }
  
  bool Visible() {
@@ -18739,7 +18755,7 @@ index 651b74e..c5b78ea 100644
  void SetTextEntry(bool active, const std::string& prompt, const std::string& text) {
      std::scoped_lock lock{imgui_mutex};
      text_entry_active = active;
-@@ -776,6 +978,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
+@@ -776,6 +983,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
      if (text_entry_active) {
          TextEntryBox();
      }
@@ -19291,7 +19307,7 @@ index 3d44504..cab3bca 100644
              std::memcpy(reinterpret_cast<void*>(e.base + pieces[i]), &target[i * 16], 16);
          }
 diff --git a/gpu/shim/bbport_settings.cpp b/gpu/shim/bbport_settings.cpp
-index 5b985a4..f86598a 100644
+index 5b985a4..a498bf3 100644
 --- a/gpu/shim/bbport_settings.cpp
 +++ b/gpu/shim/bbport_settings.cpp
 @@ -14,7 +14,7 @@ namespace {
@@ -19334,7 +19350,20 @@ index 5b985a4..f86598a 100644
      } else if (key == "fsr4_auto_exposure") {
          v.fsr4_auto_exposure = i != 0;
      } else if (key == "fsr4_invert_jitter") {
-@@ -178,7 +188,7 @@ void ConfigureDlssSupport(bool available, const char* problem) {
+@@ -161,6 +171,12 @@ void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
+     v.fsr4_supported = fsr4;
+     v.fsr411_supported = fsr4 && fsr411;
+     const int requested = v.upscaler;
++    if (requested == UpscalerFsr411 && !v.fsr411_supported && v.fsr4_supported) {
++        // DCport: FSR 4.1.1 is gone (FSR 4 runs AMD's FSR 4.1.2); an old setting gets FSR 4.
++        std::printf("Upscaler: fsr411 is no longer offered; using FSR 4\n");
++        v.upscaler = UpscalerFsr4;
++        return;
++    }
+     if ((requested == UpscalerFsr4 && !v.fsr4_supported) ||
+         (requested == UpscalerFsr411 && !v.fsr411_supported)) {
+         v.fsr4_problem = "GPU does not support the selected FSR 4 shaders; using FSR 3.1";
+@@ -178,7 +194,7 @@ void ConfigureDlssSupport(bool available, const char* problem) {
      v.dlss_problem = available || kept.empty() ? nullptr : kept.c_str();
      if (v.upscaler == UpscalerDlss && !available) {
          std::printf("Upscaler: DLSS unavailable (%s); falling back to FSR 3.1\n",
@@ -19343,7 +19372,7 @@ index 5b985a4..f86598a 100644
          v.upscaler = UpscalerFsr3;
      }
  }
-@@ -206,36 +216,70 @@ bool ResolutionNeedsRestart() {
+@@ -206,36 +222,70 @@ bool ResolutionNeedsRestart() {
           (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa));
  }
  
@@ -19420,7 +19449,7 @@ index 5b985a4..f86598a 100644
      // Read by run.py at start (hud_layout.py).
      std::fprintf(file, "hud_position=%d\n", v.hud_position.load());
      // Read by run.py at start (fov.py).
-@@ -243,6 +287,7 @@ void Save() {
+@@ -243,6 +293,7 @@ void Save() {
      // Read by run.sh at start.
      std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                    : v.live_resolution ? "1" : "0");
@@ -21011,7 +21040,7 @@ index 988d694..3237f96 100644
      typedef void (ABI *Entry)(void *, void (ABI *)(void));
      ((Entry)(image + entry))(&params, guest_exit);
 diff --git a/src/runtime.c b/src/runtime.c
-index 25865ae..42f61fa 100644
+index 25865ae..a492799 100644
 --- a/src/runtime.c
 +++ b/src/runtime.c
 @@ -160,17 +160,71 @@ static ABI __attribute__((noreturn)) void stack_fail(void) {
@@ -21090,7 +21119,15 @@ index 25865ae..42f61fa 100644
  }
  static ABI size_t guest_strlen(const char *text) { return strlen(text); }
  static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {
-@@ -236,16 +290,27 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
+@@ -230,22 +284,35 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
+     if (audio) return audio;
+     uintptr_t pad = runtime_pad_resolve(name);
+     if (pad) return pad;
++    uintptr_t wheel = runtime_wheel_resolve(name);
++    if (wheel) return wheel;
+     uintptr_t rtc = runtime_rtc_resolve(name);
+     if (rtc) return rtc;
+     uintptr_t save = runtime_savedata_resolve(name);
      if (save) return save;
      uintptr_t file = runtime_file_resolve(name);
      if (file) return file;
@@ -21122,10 +21159,18 @@ index 25865ae..42f61fa 100644
  /* Same symbol name means same contract whether imported from libkernel or
   * libScePosix, so newer modules resolve by name through runtime_symbol. */
 diff --git a/src/runtime.h b/src/runtime.h
-index 773ee79..8b377c6 100644
+index 773ee79..0baae7f 100644
 --- a/src/runtime.h
 +++ b/src/runtime.h
-@@ -20,6 +20,8 @@ void runtime_restart(void);
+@@ -2,6 +2,7 @@
+ #define BB_RUNTIME_H
+ #include <stdint.h>
+ #include <stddef.h>
++#include <stdbool.h>
+ #ifdef _WIN32
+ #include "compat_win.h"
+ /* No signals on Windows: the exception handler resumes the thread in bb_longjmp
+@@ -20,6 +21,8 @@ void runtime_restart(void);
  void runtime_quit_on_open(const char *guest);
  void runtime_quit_on_save_done(void);
  int runtime_savedata_mounted(void);
@@ -21134,7 +21179,14 @@ index 773ee79..8b377c6 100644
  #define ABI __attribute__((sysv_abi))
  typedef void (ABI *GuestCallback)(void);
  void runtime_start(uint64_t capabilities);
-@@ -85,8 +87,23 @@ uintptr_t runtime_pad_resolve(const char *name);
+@@ -82,11 +85,30 @@ void runtime_ajm_report(void);
+ uintptr_t runtime_audio_resolve(const char *name);
+ void runtime_audio_report(void);
+ uintptr_t runtime_pad_resolve(const char *name);
++/* DCport steering wheels (runtime_wheel.c): logiWheel.prx answered with an SDL wheel. */
++uintptr_t runtime_wheel_resolve(const char *name);
++uint32_t runtime_wheel_buttons(uint32_t pad);
++bool runtime_wheel_is(uint32_t joystick_id);
  void runtime_pad_report(void);
  uintptr_t runtime_rtc_resolve(const char *name);
  const char *runtime_file_user_dir(void);
@@ -22424,6 +22476,29 @@ index 35b3f4f..f202543 100644
  }
  /* Per-thread cache of recently found regions for the GPU's per-draw queries:
   * entries hold for as long as the table generation they were read at. */
+diff --git a/src/runtime_pad.c b/src/runtime_pad.c
+index 687bfb5..f4449d2 100644
+--- a/src/runtime_pad.c
++++ b/src/runtime_pad.c
+@@ -89,6 +89,10 @@ static SDL_Gamepad *current_gamepad(void) {
+     if (!gamepad) {
+         int count=0;
+         SDL_JoystickID *ids=SDL_GetGamepads(&count);
++        /* A steering wheel SDL also lists as a gamepad is the wheel (runtime_wheel.c), not the pad. */
++        int first=0;
++        while (ids && first<count && runtime_wheel_is(ids[first])) ++first;
++        if (ids && first<count) ids[0]=ids[first]; else count=0;
+         if (ids && count>0) {
+             gamepad=SDL_OpenGamepad(ids[0]);
+             if (gamepad) { ++connected_count; printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad)); }
+@@ -812,6 +816,7 @@ static void touch_ids(PadData *d) {
+ static void sample(PadData *d) {
+     reload_config_if_requested();
+     sample_host(d);
++    d->buttons|=runtime_wheel_buttons(d->buttons);
+     if (bbgpu_overlay_captures_input()) { hold_after_capture=1; return; }
+     record_sample(d);
+     read_inject();
 diff --git a/src/runtime_rwlock.c b/src/runtime_rwlock.c
 index 418035f..283cdb7 100644
 --- a/src/runtime_rwlock.c
@@ -22779,6 +22854,423 @@ index 0000000..2501f23
 +    memset(contexts, 0, sizeof contexts);
 +    pthread_mutex_unlock(&trophy_lock);
 +}
+diff --git a/src/runtime_wheel.c b/src/runtime_wheel.c
+new file mode 100644
+index 0000000..17da7fe
+--- /dev/null
++++ b/src/runtime_wheel.c
+@@ -0,0 +1,411 @@
++/* DCport: steering wheels. DRIVECLUB has its own Logitech wheel support: it links logiWheel.prx and,
++ * whenever logiWheelReadState says a wheel is there, steers with it and plays its forces through it.
++ * That library talks to USB devices this runtime does not have, so the game never saw a wheel. Here
++ * its exports answer instead (the import names are the bare NIDs): any wheel SDL lists becomes that
++ * Logitech wheel, read through SDL's joystick API, and the forces go to it through SDL haptics.
++ *
++ * Checked against the 01.28 eboot (+0xe12e30, the game's wheel class, and its readers +0xe13260..):
++ *   state +0x08 steering 0..65535 (32768 centre), +0x0a/+0x0c/+0x0e accelerator, brake, clutch
++ *   0..65535 released to pressed, +0x10 gear bits (1,2,4,8,16,32, 0x80 reverse), +0x11 pad buttons.
++ *   Effect parameters (0x2e bytes): type, duration (-1 endless), delay, flags, then int32 a..h.
++ *   Types: 0 constant (a = level), 2 periodic (a = magnitude, c = period ms), 7 spring (a = centre on
++ *   the steering scale, b = deadband, c/d = coefficients, e/f = saturations), 8 damper (c/d, e/f).
++ *   Levels are on Logitech's 0..255 scale.
++ *
++ * Settings (environment, from dcport.ini through the launcher):
++ *   BB_WHEEL       auto (default: SDL's wheel type or a wheel-like name), off, or part of a name
++ *   BB_WHEEL_AXES  steering,accelerator,brake,clutch axis numbers (default 0,1,2,3; -1 none)
++ *   BB_WHEEL_FFB   force feedback strength in percent (default 100, 0 off)
++ *   BB_WHEEL_FFB_INVERT=1  forces the other way round
++ *   BB_WHEEL_BUTTONS  <wheel button>:<pad button>,... (cross circle square triangle l1 r1 l2 r2
++ *                  l3 r3 options touchpad up down left right); default: a Logitech G29/G923 layout
++ */
++#define _GNU_SOURCE
++#include "runtime.h"
++#include <SDL3/SDL.h>
++#include <pthread.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#define LOGI_OK 0
++#define LOGI_BAD_ARG ((int32_t)0x80000001)
++#define LOGI_NOT_CONNECTED ((int32_t)0x80000004)
++#define SLOTS 16
++
++enum { AX_STEER, AX_ACCEL, AX_BRAKE, AX_CLUTCH, AX_COUNT };
++static const char *const axis_name[AX_COUNT]={"steering","accelerator","brake","clutch"};
++
++#pragma pack(push,1)
++typedef struct {
++    uint8_t type; int32_t duration, delay; uint8_t flags;
++    int32_t a, b, c, d, e, f, g, h; uint8_t tail[4];
++} Effect;
++#pragma pack(pop)
++_Static_assert(sizeof(Effect)==0x2e,"logiWheel effect parameters");
++
++static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
++static bool configured, sdl_ok;
++static char want[64]="auto";
++static int axis[AX_COUNT]={0,1,2,3};
++static int ffb_percent=100;
++static int ffb_sign=1;
++static struct { int button; uint32_t pad; } buttons[32];
++static int button_count;
++
++static SDL_Joystick *wheel;
++static SDL_JoystickID wheel_id;
++static int rest[AX_COUNT];
++static signed char inverted[AX_COUNT];   /* -1: not known yet (the axis has said nothing so far) */
++static uint32_t pad_buttons;              /* the standard pad's last buttons, for the state's copy */
++static uint64_t last_read_us;
++
++/* Force feedback: the game's calls only change these; the haptic thread passes them on. */
++static struct { bool used, playing; unsigned version; Effect p; } slot[SLOTS];
++static bool forces_wanted;
++
++static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
++static int clampi(int v, int lo, int hi) { return v<lo ? lo : v>hi ? hi : v; }
++
++static const struct { const char *name; uint32_t bit; } pad_names[]={
++    {"l3",0x2},{"r3",0x4},{"options",0x8},{"up",0x10},{"right",0x20},{"down",0x40},{"left",0x80},
++    {"l2",0x100},{"r2",0x200},{"l1",0x400},{"r1",0x800},{"triangle",0x1000},{"circle",0x2000},
++    {"cross",0x4000},{"square",0x8000},{"touchpad",0x100000},
++};
++/* Logitech G29 / G923 (PlayStation) through DirectInput: face buttons, paddles, R2/L2, Share, Options,
++ * R3, L3. The Xbox models put A B X Y on 0..3 too, so the face buttons land on the same places. */
++static const char default_buttons[]="0:cross,1:square,2:circle,3:triangle,4:r1,5:l1,6:r2,7:l2,8:touchpad,9:options,10:r3,11:l3";
++
++static void parse_buttons(const char *text) {
++    button_count=0;
++    char copy[512]; snprintf(copy,sizeof copy,"%s",text);
++    for (char *item=strtok(copy,", ");item && button_count<32;item=strtok(NULL,", ")) {
++        char *colon=strchr(item,':');
++        if (!colon) continue;
++        *colon=0;
++        for (size_t i=0;i<sizeof pad_names/sizeof *pad_names;++i)
++            if (!SDL_strcasecmp(colon+1,pad_names[i].name)) {
++                buttons[button_count].button=atoi(item); buttons[button_count++].pad=pad_names[i].bit;
++            }
++    }
++}
++
++static void configure(void) {   /* under lock */
++    if (configured) return;
++    configured=true;
++    const char *e=getenv("BB_WHEEL");
++    if (e && *e) snprintf(want,sizeof want,"%s",e);
++    if ((e=getenv("BB_WHEEL_AXES")) && *e)
++        sscanf(e,"%d,%d,%d,%d",&axis[AX_STEER],&axis[AX_ACCEL],&axis[AX_BRAKE],&axis[AX_CLUTCH]);
++    if ((e=getenv("BB_WHEEL_FFB")) && *e) ffb_percent=clampi(atoi(e),0,200);
++    if ((e=getenv("BB_WHEEL_FFB_INVERT")) && *e=='1') ffb_sign=-1;
++    e=getenv("BB_WHEEL_BUTTONS");
++    parse_buttons(e && *e ? e : default_buttons);
++}
++
++static bool looks_like_wheel(SDL_JoystickID id) {
++    const char *name=SDL_GetJoystickNameForID(id);
++    if (SDL_strcasecmp(want,"auto")) return name && SDL_strcasestr(name,want);
++    if (SDL_GetJoystickTypeForID(id)==SDL_JOYSTICK_TYPE_WHEEL) return true;
++    static const char *const words[]={"wheel","racing","driving force","g29","g920","g923","g27","g25","momo"};
++    for (size_t i=0;name && i<sizeof words/sizeof *words;++i) if (SDL_strcasestr(name,words[i])) return true;
++    return false;
++}
++
++/* The wheel, opened when it appears (looked for once a second) and closed when it goes. Under lock. */
++static SDL_Joystick *current(void) {
++    configure();
++    static bool sdl_tried;
++    if (!sdl_tried && SDL_strcasecmp(want,"off")) {
++        sdl_tried=true;
++        sdl_ok=SDL_InitSubSystem(SDL_INIT_JOYSTICK|SDL_INIT_HAPTIC);
++    }
++    if (!sdl_ok) return NULL;
++    if (wheel && !SDL_JoystickConnected(wheel)) {
++        puts("Runtime: wheel disconnected");
++        SDL_CloseJoystick(wheel); wheel=NULL; wheel_id=0;
++    }
++    if (wheel) return wheel;
++    static uint64_t next_scan;
++    const uint64_t now=now_us();
++    if (now<next_scan) return NULL;
++    next_scan=now+1000000;
++    int count=0;
++    SDL_JoystickID *ids=SDL_GetJoysticks(&count);
++    for (int i=0;ids && i<count && !wheel;++i) {
++        if (!looks_like_wheel(ids[i]) || !(wheel=SDL_OpenJoystick(ids[i]))) continue;
++        wheel_id=ids[i];
++        SDL_UpdateJoysticks();
++        printf("Runtime: wheel connected: %s (%d axes, %d buttons); DRIVECLUB sees it as a Logitech wheel\n",
++               SDL_GetJoystickName(wheel),SDL_GetNumJoystickAxes(wheel),SDL_GetNumJoystickButtons(wheel));
++        for (int a=0;a<AX_COUNT;++a) {
++            rest[a]=axis[a]>=0 && axis[a]<SDL_GetNumJoystickAxes(wheel) ? SDL_GetJoystickAxis(wheel,axis[a]) : 0;
++            /* A pedal at rest sits at one end of its axis: at the top end it reads backwards. An axis
++             * that has not reported yet reads 0; its first movement decides. */
++            inverted[a]=a==AX_STEER ? 0 : rest[a]>16384 ? 1 : rest[a]<-16384 ? 0 : -1;
++            printf("Runtime: wheel %s = axis %d (at rest %d)\n",axis_name[a],axis[a],rest[a]);
++        }
++    }
++    SDL_free(ids);
++    return wheel;
++}
++
++static uint16_t value(int a) {   /* under lock, wheel open */
++    if (axis[a]<0 || axis[a]>=SDL_GetNumJoystickAxes(wheel)) return a==AX_STEER ? 32768 : 0;
++    const int raw=SDL_GetJoystickAxis(wheel,axis[a]);
++    if (inverted[a]<0) {
++        if (raw==rest[a]) return 0;
++        inverted[a]=raw>0;   /* just moved off its rest: still near the end it rests at */
++    }
++    const int v=raw+32768;
++    return (uint16_t)clampi(inverted[a] ? 65535-v : v,0,65535);
++}
++
++/* For the wheel settings: the axes and buttons the player moves, logged a while. Under lock. */
++static void log_moves(void) {
++    static int last[16]; static bool primed; static uint64_t last_buttons; static unsigned logged;
++    if (logged>=200) return;
++    const int axes=SDL_GetNumJoystickAxes(wheel), count=SDL_GetNumJoystickButtons(wheel);
++    for (int a=0;a<axes && a<16;++a) {
++        const int v=SDL_GetJoystickAxis(wheel,a);
++        if (primed && abs(v-last[a])>12000) { printf("Runtime: wheel axis %d moved to %d\n",a,v); ++logged; }
++        if (!primed || abs(v-last[a])>12000) last[a]=v;
++    }
++    primed=true;
++    uint64_t b=0;
++    for (int i=0;i<count && i<64;++i) if (SDL_GetJoystickButton(wheel,i)) b|=UINT64_C(1)<<i;
++    for (int i=0;i<64;++i) if ((b & ~last_buttons)>>i & 1) { printf("Runtime: wheel button %d\n",i); ++logged; }
++    last_buttons=b;
++}
++
++static uint32_t mapped_buttons(void) {   /* under lock, wheel open */
++    uint32_t out=0;
++    for (int i=0;i<button_count;++i) if (SDL_GetJoystickButton(wheel,buttons[i].button)) out|=buttons[i].pad;
++    if (SDL_GetNumJoystickHats(wheel)>0) {
++        const uint8_t hat=SDL_GetJoystickHat(wheel,0);
++        if (hat & SDL_HAT_UP) out|=0x10;
++        if (hat & SDL_HAT_RIGHT) out|=0x20;
++        if (hat & SDL_HAT_DOWN) out|=0x40;
++        if (hat & SDL_HAT_LEFT) out|=0x80;
++    }
++    return out;
++}
++
++/* runtime_pad.c: the wheel's buttons join the standard pad (menus read that one), and the pad's
++ * buttons go back into the wheel state. */
++uint32_t runtime_wheel_buttons(uint32_t pad) {
++    pthread_mutex_lock(&lock);
++    pad_buttons=pad;
++    const uint32_t b=current() ? mapped_buttons() : 0;
++    pthread_mutex_unlock(&lock);
++    return b;
++}
++bool runtime_wheel_is(uint32_t id) {
++    pthread_mutex_lock(&lock);
++    const bool is=current() && id==wheel_id;
++    pthread_mutex_unlock(&lock);
++    return is;
++}
++
++/* ---- force feedback ------------------------------------------------------------------------ */
++static Sint16 level(int v) { return (Sint16)(clampi(v,-255,255)*32767/255); }
++static Uint16 magnitude(int v) { return (Uint16)(clampi(v,0,255)*65535/255); }
++static int scaled(int v) { return v*ffb_percent/100; }
++
++static bool to_sdl(const Effect *p, SDL_HapticEffect *e) {
++    memset(e,0,sizeof *e);
++    SDL_HapticDirection dir={.type=SDL_HAPTIC_CARTESIAN,.dir={1,0,0}};
++    switch (p->type) {
++    case 0:
++        e->type=SDL_HAPTIC_CONSTANT; e->constant.direction=dir; e->constant.length=SDL_HAPTIC_INFINITY;
++        e->constant.level=level(ffb_sign*scaled(p->a));
++        return true;
++    case 2:
++        e->type=SDL_HAPTIC_SINE; e->periodic.direction=dir; e->periodic.length=SDL_HAPTIC_INFINITY;
++        e->periodic.period=(Uint16)clampi(p->c,1,10000);
++        e->periodic.magnitude=(Sint16)(magnitude(scaled(abs(p->a)))/2);
++        return true;
++    case 7: case 8:
++        e->type=p->type==7 ? SDL_HAPTIC_SPRING : SDL_HAPTIC_DAMPER;
++        e->condition.direction=dir; e->condition.length=SDL_HAPTIC_INFINITY;
++        e->condition.right_coeff[0]=level(p->c); e->condition.left_coeff[0]=level(p->d);
++        e->condition.right_sat[0]=magnitude(scaled(p->e)); e->condition.left_sat[0]=magnitude(scaled(p->f));
++        if (p->type==7) {
++            e->condition.center[0]=(Sint16)clampi(ffb_sign*p->a,-32767,32767);
++            e->condition.deadband[0]=magnitude(p->b);
++        }
++        return true;
++    }
++    return false;
++}
++
++static unsigned type_flag(int type) {
++    return type==0 ? SDL_HAPTIC_CONSTANT : type==2 ? SDL_HAPTIC_SINE : type==7 ? SDL_HAPTIC_SPRING : type==8 ? SDL_HAPTIC_DAMPER : 0;
++}
++
++static void *haptic_thread(void *unused) {
++    (void)unused;
++    SDL_Haptic *haptic=NULL;
++    SDL_JoystickID owner=0;
++    struct { int id; unsigned version; bool running; int type; } live[SLOTS];
++    for (int i=0;i<SLOTS;++i) live[i].id=-1;
++    bool held=false, centring_off=false;
++    for (;;) {
++        SDL_Delay(4);
++        Effect want[SLOTS]; bool used[SLOTS], playing[SLOTS]; unsigned version[SLOTS];
++        pthread_mutex_lock(&lock);
++        SDL_Joystick *j=current();
++        if (j && (!haptic || owner!=wheel_id)) {
++            if (haptic) SDL_CloseHaptic(haptic);
++            for (int i=0;i<SLOTS;++i) live[i].id=-1;
++            haptic=SDL_OpenHapticFromJoystick(j);
++            owner=wheel_id; centring_off=false;
++            if (haptic) {
++                printf("Runtime: wheel force feedback on (%d%%; %s)\n",ffb_percent,SDL_GetHapticName(haptic));
++                if (SDL_GetHapticFeatures(haptic) & SDL_HAPTIC_GAIN) SDL_SetHapticGain(haptic,100);
++            } else printf("Runtime: wheel force feedback unavailable: %s\n",SDL_GetError());
++        }
++        if (!j && haptic) { SDL_CloseHaptic(haptic); haptic=NULL; owner=0; }
++        for (int i=0;i<SLOTS;++i) { want[i]=slot[i].p; used[i]=slot[i].used; playing[i]=slot[i].playing; version[i]=slot[i].version; }
++        /* The game stopped reading the wheel (paused, loading, closing): no forces until it reads again. */
++        const bool reading=now_us()-last_read_us<500000;
++        const bool forces=forces_wanted;
++        pthread_mutex_unlock(&lock);
++        if (!haptic) continue;
++        if (!reading) {
++            if (!held) { SDL_StopHapticEffects(haptic); for (int i=0;i<SLOTS;++i) live[i].running=false; held=true; }
++            continue;
++        }
++        held=false;
++        if (forces && !centring_off) {   /* the game's spring does the centring once it plays forces */
++            centring_off=true;
++            if (SDL_GetHapticFeatures(haptic) & SDL_HAPTIC_AUTOCENTER) SDL_SetHapticAutocenter(haptic,0);
++        }
++        for (int i=0;i<SLOTS;++i) {
++            if (!used[i]) continue;
++            if (live[i].id>=0 && live[i].type!=want[i].type) { SDL_DestroyHapticEffect(haptic,live[i].id); live[i].id=-1; }
++            if (live[i].id<0 || live[i].version!=version[i]) {
++                SDL_HapticEffect e;
++                if (!to_sdl(&want[i],&e) || !(SDL_GetHapticFeatures(haptic) & type_flag(want[i].type))) { live[i].version=version[i]; continue; }
++                if (live[i].id<0) {
++                    live[i].id=SDL_CreateHapticEffect(haptic,&e); live[i].type=want[i].type; live[i].running=false;
++                } else if (!SDL_UpdateHapticEffect(haptic,live[i].id,&e)) {
++                    SDL_DestroyHapticEffect(haptic,live[i].id); live[i].id=SDL_CreateHapticEffect(haptic,&e); live[i].running=false;
++                }
++                live[i].version=version[i];
++            }
++            if (live[i].id<0) continue;
++            if (playing[i] && !live[i].running) live[i].running=SDL_RunHapticEffect(haptic,live[i].id,1);
++            else if (!playing[i] && live[i].running) { SDL_StopHapticEffect(haptic,live[i].id); live[i].running=false; }
++        }
++    }
++    return NULL;
++}
++
++static void start_haptics(void) {   /* under lock */
++    static bool started;
++    if (started || !ffb_percent || !SDL_strcasecmp(want,"off")) return;
++    started=true;
++    pthread_t t;
++    if (!pthread_create(&t,NULL,haptic_thread,NULL)) pthread_detach(t);
++}
++
++/* ---- logiWheel.prx exports ------------------------------------------------------------------ */
++static ABI int32_t logi_init(uint32_t version) {
++    pthread_mutex_lock(&lock);
++    configure();
++    start_haptics();
++    pthread_mutex_unlock(&lock);
++    printf("Runtime: logiWheelInit(0x%x) answered by DCport (wheel %s, force feedback %d%%)\n",version,want,ffb_percent);
++    return LOGI_OK;
++}
++static ABI int32_t logi_term(void) { return LOGI_OK; }
++static ABI int32_t logi_read_state(uint8_t *state) {
++    if (!state) return LOGI_BAD_ARG;
++    pthread_mutex_lock(&lock);
++    last_read_us=now_us();
++    if (!current()) { pthread_mutex_unlock(&lock); return LOGI_NOT_CONNECTED; }
++    log_moves();
++    const uint16_t v[AX_COUNT]={value(AX_STEER),value(AX_ACCEL),value(AX_BRAKE),value(AX_CLUTCH)};
++    const uint32_t b=pad_buttons|mapped_buttons();
++    pthread_mutex_unlock(&lock);
++    memset(state,0,0x25);
++    memcpy(state+8,v,sizeof v);
++    memcpy(state+0x11,&b,4);
++    return LOGI_OK;
++}
++static bool connected(void) {
++    pthread_mutex_lock(&lock);
++    const bool c=current()!=NULL;
++    pthread_mutex_unlock(&lock);
++    return c;
++}
++static ABI int32_t logi_play_effect(int32_t *id, const Effect *p) {
++    if (!id || !p) return LOGI_BAD_ARG;
++    if (!connected()) return LOGI_NOT_CONNECTED;
++    pthread_mutex_lock(&lock);
++    int free_slot=-1;
++    for (int i=0;i<SLOTS && free_slot<0;++i) if (!slot[i].used) free_slot=i;
++    if (free_slot>=0) {
++        slot[free_slot].used=slot[free_slot].playing=true; slot[free_slot].p=*p; ++slot[free_slot].version;
++        forces_wanted=true;
++    }
++    pthread_mutex_unlock(&lock);
++    if (free_slot<0) return LOGI_BAD_ARG;
++    *id=free_slot;
++    return LOGI_OK;
++}
++static ABI int32_t logi_update_effect(int32_t id, const Effect *p) {
++    if (!p || id<0 || id>=SLOTS) return LOGI_BAD_ARG;
++    pthread_mutex_lock(&lock);
++    const bool ok=slot[id].used;
++    if (ok) {
++        if (memcmp(&slot[id].p,p,sizeof *p)) { slot[id].p=*p; ++slot[id].version; }
++        slot[id].playing=true;
++    }
++    pthread_mutex_unlock(&lock);
++    return ok ? LOGI_OK : LOGI_BAD_ARG;
++}
++static ABI int32_t logi_stop_effect(int32_t id) {
++    if (id<0 || id>=SLOTS) return LOGI_BAD_ARG;
++    pthread_mutex_lock(&lock);
++    slot[id].playing=false;
++    pthread_mutex_unlock(&lock);
++    return LOGI_OK;
++}
++static ABI int32_t logi_connected_only(void) { return connected() ? LOGI_OK : LOGI_NOT_CONNECTED; }
++static ABI int32_t logi_set_range(int32_t degrees, uint8_t flag) {
++    static unsigned told;
++    if (told++<4) printf("Runtime: logiWheel operating range %d degrees (%u); the wheel keeps its own setting\n",degrees,flag);
++    return logi_connected_only();
++}
++
++/* NIDs of logiWheel.prx's exports (their names are not public). */
++static const struct { const char *nid; void *function; } logi_exports[]={
++    {"rqu39g1mv38",(void *)logi_init},
++    {"MjWOyyyHMbw",(void *)logi_term},
++    {"pkk2E4Izy-Q",(void *)logi_read_state},
++    {"OO6XBeuXhsg",(void *)logi_play_effect},
++    {"mPcvqcI2O50",(void *)logi_update_effect},
++    {"0gsOoL2NyqQ",(void *)logi_stop_effect},
++    {"-8HzgEWqpx4",(void *)logi_connected_only},   /* autocentre on/off: the forces decide here */
++    {"rFRMV3lLSJs",(void *)logi_set_range},
++    {"xqPuCy0mIrc",(void *)logi_connected_only},   /* rev lights */
++    {"MubUr+Qm4M4",(void *)logi_connected_only},
++};
++
++uintptr_t runtime_wheel_resolve(const char *name) {
++    const char *hash=strchr(name,'#');
++    const size_t length=hash ? (size_t)(hash-name) : strlen(name);
++    for (size_t i=0;i<sizeof logi_exports/sizeof *logi_exports;++i)
++        if (strlen(logi_exports[i].nid)==length && !memcmp(name,logi_exports[i].nid,length)) {
++            pthread_mutex_lock(&lock);
++            configure();
++            const bool off=!SDL_strcasecmp(want,"off");
++            pthread_mutex_unlock(&lock);
++            return off ? 0 : (uintptr_t)logi_exports[i].function;   /* off: the game's own library, as before */
++        }
++    return 0;
++}
 diff --git a/tests/test_fault_emulation.cpp b/tests/test_fault_emulation.cpp
 new file mode 100644
 index 0000000..21cd560
@@ -23025,6 +23517,19 @@ index 5d8464a..37465c6 100644
  uint64_t runtime_process_time_counter() { return runtime_process_time_us() * 1000; }
  int32_t* runtime_errno() { std::abort(); }
  int runtime_memory_write_backing(uintptr_t, const void*, uint64_t) { std::abort(); }
+diff --git a/tests/test_pad.c b/tests/test_pad.c
+index a477ea9..dc62559 100644
+--- a/tests/test_pad.c
++++ b/tests/test_pad.c
+@@ -5,6 +5,8 @@
+ 
+ static int capture;
+ int bbgpu_overlay_captures_input(void) { return capture; }
++uint32_t runtime_wheel_buttons(uint32_t pad) { (void)pad; return 0; }
++bool runtime_wheel_is(uint32_t id) { (void)id; return false; }
+ uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
+     (void)table; (void)count; (void)name;
+     return 0;
 diff --git a/tests/test_prompt_icons.cpp b/tests/test_prompt_icons.cpp
 index a5edf37..37e4026 100644
 --- a/tests/test_prompt_icons.cpp
@@ -23188,6 +23693,34 @@ index 0000000..b66b116
 +    puts("PASS: trophies persist across restarts");
 +    return 0;
 +}
+diff --git a/tests/test_upscaler_support.cpp b/tests/test_upscaler_support.cpp
+index 66bd7e6..164238a 100644
+--- a/tests/test_upscaler_support.cpp
++++ b/tests/test_upscaler_support.cpp
+@@ -40,9 +40,12 @@ int main() {
+                 Load();
+                 assert(s.upscaler == requested);
+                 ConfigureUpscalerSupport(fsr4, fsr411);
++                // An FSR 4.1.1 setting without 4.1.1 becomes FSR 4 when FSR 4 runs (DCport).
++                const bool to_fsr4 = requested == UpscalerFsr411 && fsr4 && !fsr411;
+                 const bool unsupported = (requested == UpscalerFsr4 && !fsr4) ||
+-                    (requested == UpscalerFsr411 && !(fsr4 && fsr411));
+-                assert(s.upscaler == (unsupported ? UpscalerFsr3 : requested));
++                    (requested == UpscalerFsr411 && !fsr4);
++                const int expected = to_fsr4 ? UpscalerFsr4 : unsupported ? UpscalerFsr3 : requested;
++                assert(s.upscaler == expected);
+                 assert(s.fsr4_supported == fsr4);
+                 assert(s.fsr411_supported == (fsr4 && fsr411));
+                 assert(bool(s.fsr4_problem.load()) == unsupported);
+@@ -50,7 +53,7 @@ int main() {
+                 // Startup patch settings still describe the already applied guest patches.
+                 assert(s.startup_upscaler == requested);
+                 ConfigureUpscalerSupport(fsr4, fsr411);
+-                assert(s.upscaler == (unsupported ? UpscalerFsr3 : requested));
++                assert(s.upscaler == expected);
+             }
+         }
+     }
 diff --git a/tools/build_cpu_compat.py b/tools/build_cpu_compat.py
 index 20883fe..361a0ae 100644
 --- a/tools/build_cpu_compat.py

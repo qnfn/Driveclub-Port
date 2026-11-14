@@ -124,6 +124,10 @@ def session_upscale(paths: AppPaths, s: LauncherSettings, fsr: bool) -> float:
     return upscale_factor(scaling(paths, s))
 
 
+WHEEL_KEYS = (("wheel", "BB_WHEEL"), ("wheel_axes", "BB_WHEEL_AXES"), ("wheel_ffb", "BB_WHEEL_FFB"),
+              ("wheel_ffb_invert", "BB_WHEEL_FFB_INVERT"), ("wheel_buttons", "BB_WHEEL_BUTTONS"))
+
+
 def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
              base: Mapping[str, str]) -> dict[str, str]:
     env = dict(base)
@@ -178,6 +182,13 @@ def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
     env.pop("BB_DC_UI_FIT", None)
     if ui_fit(paths) == "0":
         env["BB_DC_UI_FIT"] = "0"
+    # Steering wheels (runtime wheel support): dcport.ini wheel (auto/off/part of the name),
+    # wheel_axes (steering,accelerator,brake,clutch), wheel_ffb (percent), wheel_ffb_invert (0/1),
+    # wheel_buttons (<button>:<pad button>,...). Missing lines keep the runtime's defaults.
+    for key, name in WHEEL_KEYS:
+        env.pop(name, None)
+        if value := _ini_value(paths, key, ""):
+            env[name] = value
     if s.fps == 30:
         env["BB_VBLANK_HZ"] = "60"
         env["BB_FPS_LIMIT"] = "0"
@@ -197,7 +208,6 @@ def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
         # The 1080p frame scaled to a bigger window or screen with FSR 1 and RCAS.
         env["BB_FSR1"] = "1"
         env["BB_FSR4_DIR"] = str(paths.fsr4_dir)
-        env["BB_FSR411_DIR"] = str(paths.root / "fsr4_411")  # built by SETUP (dcport.fsr411)
     else:
         env.pop("BB_FSR4_DIR", None)
         env.pop("BB_FSR1", None)

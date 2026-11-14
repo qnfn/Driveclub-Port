@@ -24,7 +24,8 @@ from prepare import nid
 STRLEN_BASELINE = bytes.fromhex('31c0803c0700740548ffc0ebf5c3')
 LIBC_SHA256 = '4378b47f46f1d856824a6f971db1a0c3f41833b77f49d2fba9538f667a139166'
 MAX_IMAGE_SIZE = 512 * 1024 * 1024
-SUPPORTED = frozenset(('andn', 'bextr', 'blsr', 'blsi', 'blsmsk', 'tzcnt', 'lzcnt', 'movbe'))
+SUPPORTED = frozenset(('andn', 'bextr', 'blsr', 'blsi', 'blsmsk', 'tzcnt', 'lzcnt', 'movbe',
+                       'vcvtps2ph', 'vcvtph2ps'))
 # D015 is a closed exception, never a general instruction-stealing facility.
 COUNT_SPAN_MODULE_SHA256 = 'd65f0b4f01d59166aed16f8604196d8b7dd805abbf0758b356e8f1354c9429f9'
 COUNT_SPAN_FUNCTION = (0x26addc0, 0x26adf49,
@@ -169,7 +170,8 @@ def atomic_output(path):
 
 
 # CPUID (leaf, register index in eax/ebx/ecx/edx, bit) of the extensions the plan translates.
-HOST_EXTENSIONS = {'BMI1': (7, 1, 3), 'LZCNT': (0x80000001, 2, 5), 'MOVBE': (1, 2, 22)}
+HOST_EXTENSIONS = {'BMI1': (7, 1, 3), 'LZCNT': (0x80000001, 2, 5), 'MOVBE': (1, 2, 22),
+                   'F16C': (1, 2, 29)}
 # push rbx; mov eax,ecx; mov ecx,edx; cpuid; mov [r8],eax; mov [r8+4],ebx; mov [r8+8],ecx;
 # mov [r8+12],edx; pop rbx; ret  (Windows x64: leaf in ecx, subleaf in edx, output in r8)
 CPUID_CODE = bytes.fromhex('53' '89c8' '89d1' '0fa2' '418900' '41895804' '41894808' '4189500c' '5b' 'c3')
@@ -205,7 +207,7 @@ def missing_host_extensions(cpuid=None):
             for line in Path('/proc/cpuinfo').read_text(encoding='utf-8', errors='replace').splitlines():
                 if line.startswith('flags'):
                     flags = set(line.split(':', 1)[1].split())
-                    names = {'BMI1': 'bmi1', 'LZCNT': 'abm', 'MOVBE': 'movbe'}
+                    names = {'BMI1': 'bmi1', 'LZCNT': 'abm', 'MOVBE': 'movbe', 'F16C': 'f16c'}
                     return [name for name in HOST_EXTENSIONS if names[name] not in flags]
         except OSError:
             pass
