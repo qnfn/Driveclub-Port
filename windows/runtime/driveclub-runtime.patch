@@ -16192,7 +16192,7 @@ index bddf909..2a3039c 100644
 +
 +} // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.cpp
-index b5e5810..a6c30b3 100644
+index b5e5810..b4921ff 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.cpp
 @@ -1,6 +1,7 @@
@@ -16228,7 +16228,53 @@ index b5e5810..a6c30b3 100644
  bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                        vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,
                        std::optional<VideoCore::SubresourceRange> subres_range) {
-@@ -528,6 +547,8 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
+@@ -389,8 +408,7 @@ void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
+     dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+ }
+ 
+-void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
+-                                  const VideoCore::Buffer* buffer, u64 offset) {
++void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst) {
+     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
+     const u32 num_layers = std::min(src->info.resources.layers, dst->info.resources.layers);
+ 
+@@ -398,7 +416,7 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
+     SetBackingSamples(src, src->info.num_samples);
+ 
+     vk::BufferImageCopy buffer_copy = {
+-        .bufferOffset = offset,
++        .bufferOffset = 0,
+         .bufferRowLength = 0,
+         .bufferImageHeight = 0,
+         .imageSubresource{
+@@ -415,15 +433,23 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
+     buffer_copies.push_back(buffer_copy);
+     for (u32 mip = 1; mip < num_mips; ++mip) {
+         auto mip_copy = buffer_copy;
+-        mip_copy.bufferOffset = Common::AlignUp(offset + copy_size, 16);
++        mip_copy.bufferOffset = Common::AlignUp(copy_size, 16);
+         mip_copy.imageSubresource.mipLevel = mip;
+         mip_copy.imageExtent = vk::Extent3D{std::max(src->info.size.width >> mip, 1u),
+                                             std::max(src->info.size.height >> mip, 1u),
+                                             std::max(src->info.size.depth >> mip, 1u)};
+-        copy_size =
+-            mip_copy.bufferOffset - offset + BufferImageCopySize(mip_copy, src->info.pixel_format);
++        copy_size = mip_copy.bufferOffset + BufferImageCopySize(mip_copy, src->info.pixel_format);
+         buffer_copies.push_back(mip_copy);
+     }
++    // DCport: staging of the copy's own size. A fixed 128 MiB request made a new 128 MiB VRAM
++    // buffer whenever the last one was still in flight, kept 3000 frames: 3-4 GB of VRAM on
++    // 4-8 GB cards (texture evictions, device lost).
++    const auto staging = staging_pool.Request(copy_size, VideoCore::MemoryType::DeviceLocal, 16);
++    const VideoCore::Buffer* buffer = staging.buffer;
++    const u64 offset = staging.offset;
++    for (auto& copy : buffer_copies) {
++        copy.bufferOffset += offset;
++    }
+ 
+     scheduler.EndRendering();
+ 
+@@ -528,16 +554,15 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
  
  void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
      if (src->info.num_samples == 1 && dst->info.num_samples == 1) {
@@ -16237,7 +16283,19 @@ index b5e5810..a6c30b3 100644
          if ((instance.IsMaintenance8Supported() ||
               src->info.props.is_depth == dst->info.props.is_depth) &&
              src->aspect_mask == dst->aspect_mask) {
-@@ -556,8 +577,35 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
+             CopyImage(src, dst);
+         } else {
+-            // Perform depth from/to color copy using the intermediate copy buffer.
+-            static constexpr size_t COPY_BUFFER_SIZE = 128_MB;
+-            const auto copy_ref =
+-                staging_pool.Request(COPY_BUFFER_SIZE, VideoCore::MemoryType::DeviceLocal);
+-            CopyImageWithBuffer(src, dst, copy_ref.buffer, copy_ref.offset);
++            // Perform depth from/to color copy using an intermediate copy buffer.
++            CopyImageWithBuffer(src, dst);
+         }
+     } else if (src->info.num_samples == 1 && dst->info.num_samples > 1 &&
+                dst->info.props.is_depth) {
+@@ -556,8 +581,35 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
          blit_helper->ReinterpretColorAsMsDepth(
              dst->info.size.width, dst->info.size.height, dst->info.num_samples,
              src->info.pixel_format, dst->info.pixel_format, src->GetImage(), dst->GetImage());
@@ -16275,7 +16333,7 @@ index b5e5810..a6c30b3 100644
  }
  
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.h b/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.h
-index e2392c5..82ef7f9 100644
+index e2392c5..f49a38e 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_runtime.h
 @@ -50,6 +50,9 @@ public:
@@ -16288,6 +16346,16 @@ index e2392c5..82ef7f9 100644
  
      bool Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                   vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,
+@@ -74,8 +77,7 @@ public:
+                        std::span<const vk::BufferImageCopy> download_copies);
+ 
+     void CopyImage(VideoCore::Image* src, VideoCore::Image* dst);
+-    void CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
+-                             const VideoCore::Buffer* buffer, u64 offset);
++    void CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst);
+     void CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32 slice);
+ 
+     void CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst);
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
 index 135f51a..f8fbb37 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
@@ -17958,18 +18026,19 @@ index 9b8699c..9d1c2f9 100644
  
      Sampler(const Sampler&) = delete;
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-index 6c56743..6d787c4 100644
+index 6c56743..c2a6e49 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-@@ -2,6 +2,7 @@
+@@ -2,6 +2,8 @@
  // SPDX-License-Identifier: GPL-2.0-or-later
  
  #include <algorithm>
++#include <array>
 +#include <atomic>
  #include <chrono>
  #include <cstdio>
  #include <limits>
-@@ -11,6 +12,7 @@
+@@ -11,6 +13,7 @@
  #include "bbport_process_memory.h"
  #include "bbport_prompts.h"
  #include "bbport_toggles.h"
@@ -17977,7 +18046,16 @@ index 6c56743..6d787c4 100644
  #include "common/assert.h"
  #include "common/debug.h"
  #include "common/div_ceil.h"
-@@ -170,7 +172,29 @@ void TextureCache::DownloadImageMemory(ImageId image_id, DownloadMemoryFlags fla
+@@ -27,6 +30,8 @@
+ #include "video_core/texture_cache/texture_cache.h"
+ #include "video_core/texture_cache/tile_manager.h"
+ 
++#include <vk_mem_alloc.h>
++
+ namespace VideoCore {
+ 
+ static constexpr u32 MAX_IMAGES = std::numeric_limits<u16>::max();
+@@ -170,7 +175,29 @@ void TextureCache::DownloadImageMemory(ImageId image_id, DownloadMemoryFlags fla
  /// refresh (they hashed different ranges, the whole image and its first 8x8 pixels, so the
  /// first check never matched). Such an image lies within the faulting page: cheap to hash
  /// whole, and a CPU write past its first pixels still counts.
@@ -18007,7 +18085,7 @@ index 6c56743..6d787c4 100644
      return XXH3_64bits(std::bit_cast<const u8*>(image.info.guest_address), image.info.guest_size);
  }
  
-@@ -317,6 +341,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
+@@ -317,6 +344,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
          // Inherit image usage
          auto& new_image = slot_images[new_image_id];
          new_image.usage = old_image.usage;
@@ -18016,7 +18094,7 @@ index 6c56743..6d787c4 100644
          if (new_info.num_samples == 1 &&
              (new_info.resources.layers > old_image.info.resources.layers ||
               new_info.resources.levels > old_image.info.resources.levels)) {
-@@ -407,7 +433,11 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
+@@ -407,7 +436,11 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
              return {merged_image_id, -1, -1};
          }
  
@@ -18029,7 +18107,7 @@ index 6c56743..6d787c4 100644
          // Calculate expected size based on format and dimensions
          u64 expected_size =
              (static_cast<u64>(image_info.size.width) * static_cast<u64>(image_info.size.height) *
-@@ -521,8 +551,12 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
+@@ -521,8 +554,12 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
  
                    merged_image_id.index, static_cast<int>(binding), scheduler.CurrentTick(),
                    scheduler.CurrentTick() - cache_image.tick_accessed_last);
@@ -18044,7 +18122,7 @@ index 6c56743..6d787c4 100644
      }
  
      // Right overlap, the image requested is a possible subresource of the image from cache.
-@@ -555,12 +589,19 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
+@@ -555,12 +592,19 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                      return {merged_image_id, -1, -1};
                  }
  
@@ -18069,7 +18147,7 @@ index 6c56743..6d787c4 100644
              }
          }
      }
-@@ -575,8 +616,18 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
+@@ -575,8 +619,18 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
      auto& src_image = slot_images[image_id];
      auto& new_image = slot_images[new_image_id];
  
@@ -18089,7 +18167,7 @@ index 6c56743..6d787c4 100644
  
      if (src_image.binding.is_bound || src_image.binding.is_target) {
          src_image.binding.needs_rebind = 1u;
-@@ -584,7 +635,9 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
+@@ -584,7 +638,9 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
  
      TrackImage(new_image_id);
      new_image.flags &= ~ImageFlagBits::Dirty;
@@ -18100,7 +18178,7 @@ index 6c56743..6d787c4 100644
      FreeImage(image_id);
  
      return new_image_id;
-@@ -885,7 +938,8 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
+@@ -885,7 +941,8 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
  }
  
  void TextureCache::AssociateStencil(ImageId depth_id, const ImageInfo& depth_info) {
@@ -18110,7 +18188,7 @@ index 6c56743..6d787c4 100644
          return;
      }
      ImageId stencil_id{};
-@@ -1007,17 +1061,23 @@ void TextureCache::RefreshImage(Image& image) {
+@@ -1007,17 +1064,23 @@ void TextureCache::RefreshImage(Image& image) {
  
  vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sharp,
                                       AmdGpu::BorderColorBuffer border_color_base,
@@ -18139,7 +18217,36 @@ index 6c56743..6d787c4 100644
          Sampler& sampler = slot_samplers[it->second];
          sampler.hash = hash;
          sampler_lru_cache.Insert(sampler, gc_tick);
-@@ -1217,13 +1277,22 @@ void TextureCache::GarbageCollectImages() {
+@@ -1200,6 +1263,28 @@ void TextureCache::ReportMemory() {
+                 (unsigned long long)(kept_bytes >> 20),
+                 (unsigned long long)(process.private_bytes >> 20),
+                 (unsigned long long)(process.working_set >> 20));
++    // DCport: VRAM by owner, per device-local heap. VMA blocks hold the textures and buffers
++    // (blocks minus allocations = space VMA keeps but nothing uses); the rest of the driver's
++    // usage is the game memory backing and its reserve (allocated directly) plus the driver's own.
++    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
++    vmaGetHeapBudgets(instance.GetAllocator(), budgets.data());
++    const auto& heaps = instance.GetMemoryProperties();
++    for (u32 heap = 0; heap < heaps.memoryHeapCount; ++heap) {
++        if (!(heaps.memoryHeaps[heap].flags & vk::MemoryHeapFlagBits::eDeviceLocal)) {
++            continue;
++        }
++        const VmaBudget& b = budgets[heap];
++        const u64 vma_blocks = b.statistics.blockBytes;
++        const u64 outside = b.usage > vma_blocks ? b.usage - vma_blocks : 0;
++        std::printf("VRAM heap %u: %llu of %llu MiB used (heap %llu MiB); VMA %u blocks %llu MiB "
++                    "holding %u allocations %llu MiB; outside VMA %llu MiB\n",
++                    heap, (unsigned long long)(b.usage >> 20), (unsigned long long)(b.budget >> 20),
++                    (unsigned long long)(heaps.memoryHeaps[heap].size >> 20),
++                    b.statistics.blockCount, (unsigned long long)(vma_blocks >> 20),
++                    b.statistics.allocationCount,
++                    (unsigned long long)(b.statistics.allocationBytes >> 20),
++                    (unsigned long long)(outside >> 20));
++    }
+     std::fflush(stdout);
+ }
+ 
+@@ -1217,13 +1302,22 @@ void TextureCache::GarbageCollectImages() {
          // ~1 GB after its 8 GB system reserve: usage stayed above the critical mark, so the
          // collector evicted images used two or three frames ago on every submission and wrote
          // GPU-written ones back. Compare with the driver's current budget instead.
@@ -18197,7 +18304,7 @@ index 8d41b8c..d34abcf 100644
                           vk::PipelineStageFlagBits2::eComputeShader,
                           vk::AccessFlagBits2::eShaderRead);
 diff --git a/gpu/shim/bbgpu.cpp b/gpu/shim/bbgpu.cpp
-index 3a73ecf..b4d19f7 100644
+index 3a73ecf..f84cb7c 100644
 --- a/gpu/shim/bbgpu.cpp
 +++ b/gpu/shim/bbgpu.cpp
 @@ -36,7 +36,7 @@ extern "C" {
@@ -18209,7 +18316,16 @@ index 3a73ecf..b4d19f7 100644
  uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size);
  int runtime_memory_region(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped);
  void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
-@@ -233,7 +233,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
+@@ -47,6 +47,8 @@ uint64_t runtime_process_time_counter(void);
+ uint64_t runtime_tsc_frequency(void);
+ int32_t* runtime_errno(void);
+ void runtime_memory_set_gpu_hooks(RuntimeGpuRange map, RuntimeGpuRange unmap, RuntimeGpuRange invalidate);
++// runtime_wheel.c: stops the wheel's forces before the process ends
++void runtime_wheel_shutdown(void);
+ }
+ 
+ Frontend::WindowSDL* g_window = nullptr;
+@@ -233,7 +235,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
      if (config->user_dir) setenv("BB_GPU_USER_DIR", config->user_dir, 0);
  #endif
      Core::Emulator::FillElfInfo(*config);
@@ -18218,6 +18334,14 @@ index 3a73ecf..b4d19f7 100644
      const s32 width = config->width, height = config->height;
      g_window_thread = std::thread([title, width, height] {
          Common::SetCurrentThreadName("bb:window");
+@@ -248,6 +250,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
+             SDL_Delay(2);
+         }
+         LOG_INFO(Frontend, "Window closed by user");
++        runtime_wheel_shutdown();
+         std::fflush(stdout);
+         std::_Exit(0);
+     });
 diff --git a/gpu/shim/bbport_overlay.cpp b/gpu/shim/bbport_overlay.cpp
 index 651b74e..c467dee 100644
 --- a/gpu/shim/bbport_overlay.cpp
@@ -19535,6 +19659,21 @@ index 57a9486..0fe1416 100644
  struct WaitTimer {
      std::atomic<std::uint64_t>& total;
      std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+diff --git a/gpu/shim/common/assert.cpp b/gpu/shim/common/assert.cpp
+index 2a5a5ba..0a3a043 100644
+--- a/gpu/shim/common/assert.cpp
++++ b/gpu/shim/common/assert.cpp
+@@ -5,7 +5,10 @@
+ #include "common/assert.h"
+ #include "common/logging/log.h"
+ 
++extern "C" void runtime_wheel_shutdown(void);
++
+ void assert_fail_impl() {
++    runtime_wheel_shutdown(); // DCport: no wheel forces left playing after the stop
+     std::fflush(stdout);
+     std::fputs("STOP: GPU library assertion failed (see GPU log above)\n", stderr);
+     std::_Exit(23);
 diff --git a/gpu/shim/core/emulator_settings.h b/gpu/shim/core/emulator_settings.h
 index 4d583c1..325bf4e 100644
 --- a/gpu/shim/core/emulator_settings.h
@@ -21040,10 +21179,18 @@ index 988d694..3237f96 100644
      typedef void (ABI *Entry)(void *, void (ABI *)(void));
      ((Entry)(image + entry))(&params, guest_exit);
 diff --git a/src/runtime.c b/src/runtime.c
-index 25865ae..a492799 100644
+index 25865ae..bab1de3 100644
 --- a/src/runtime.c
 +++ b/src/runtime.c
-@@ -160,17 +160,71 @@ static ABI __attribute__((noreturn)) void stack_fail(void) {
+@@ -68,6 +68,7 @@ void runtime_start(uint64_t flags) {
+     stack_canary &= ~UINT64_C(255);
+ }
+ void runtime_report(void) {
++    runtime_wheel_shutdown();   /* every exit path reports first: no wheel forces left playing */
+     printf("Runtime: _init_env=%zu, atexit=%zu, __cxa_atexit=%zu, registered handlers=%zu\n",
+            calls_init, calls_atexit, calls_cxa, handler_count);
+     printf("Runtime: static guards acquired=%zu, released=%zu\n", (size_t)guards_acquired, (size_t)guards_released);
+@@ -160,17 +161,71 @@ static ABI __attribute__((noreturn)) void stack_fail(void) {
      fputs("STOP: guest stack protector detected corruption\n", stderr);
      exit(22);
  }
@@ -21119,7 +21266,7 @@ index 25865ae..a492799 100644
  }
  static ABI size_t guest_strlen(const char *text) { return strlen(text); }
  static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {
-@@ -230,22 +284,35 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
+@@ -230,22 +285,35 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
      if (audio) return audio;
      uintptr_t pad = runtime_pad_resolve(name);
      if (pad) return pad;
@@ -21159,7 +21306,7 @@ index 25865ae..a492799 100644
  /* Same symbol name means same contract whether imported from libkernel or
   * libScePosix, so newer modules resolve by name through runtime_symbol. */
 diff --git a/src/runtime.h b/src/runtime.h
-index 773ee79..0baae7f 100644
+index 773ee79..bdcfcfe 100644
 --- a/src/runtime.h
 +++ b/src/runtime.h
 @@ -2,6 +2,7 @@
@@ -21179,7 +21326,7 @@ index 773ee79..0baae7f 100644
  #define ABI __attribute__((sysv_abi))
  typedef void (ABI *GuestCallback)(void);
  void runtime_start(uint64_t capabilities);
-@@ -82,11 +85,30 @@ void runtime_ajm_report(void);
+@@ -82,11 +85,31 @@ void runtime_ajm_report(void);
  uintptr_t runtime_audio_resolve(const char *name);
  void runtime_audio_report(void);
  uintptr_t runtime_pad_resolve(const char *name);
@@ -21187,6 +21334,7 @@ index 773ee79..0baae7f 100644
 +uintptr_t runtime_wheel_resolve(const char *name);
 +uint32_t runtime_wheel_buttons(uint32_t pad);
 +bool runtime_wheel_is(uint32_t joystick_id);
++void runtime_wheel_shutdown(void);
  void runtime_pad_report(void);
  uintptr_t runtime_rtc_resolve(const char *name);
  const char *runtime_file_user_dir(void);
@@ -22856,10 +23004,10 @@ index 0000000..2501f23
 +}
 diff --git a/src/runtime_wheel.c b/src/runtime_wheel.c
 new file mode 100644
-index 0000000..17da7fe
+index 0000000..a9e54e3
 --- /dev/null
 +++ b/src/runtime_wheel.c
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,449 @@
 +/* DCport: steering wheels. DRIVECLUB has its own Logitech wheel support: it links logiWheel.prx and,
 + * whenever logiWheelReadState says a wheel is there, steers with it and plays its forces through it.
 + * That library talks to USB devices this runtime does not have, so the game never saw a wheel. Here
@@ -22927,6 +23075,11 @@ index 0000000..17da7fe
 +/* Force feedback: the game's calls only change these; the haptic thread passes them on. */
 +static struct { bool used, playing; unsigned version; Effect p; } slot[SLOTS];
 +static bool forces_wanted;
++/* The haptic thread's device, guarded by haptic_lock while the thread uses it, so that the exit can
++ * stop the forces: a wheel left with forces playing kept them after the game closed. */
++static pthread_mutex_t haptic_lock=PTHREAD_MUTEX_INITIALIZER;
++static SDL_Haptic *haptic_dev;
++static bool haptic_closed;
 +
 +static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
 +static int clampi(int v, int lo, int hi) { return v<lo ? lo : v>hi ? hi : v; }
@@ -23116,6 +23269,8 @@ index 0000000..17da7fe
 +    bool held=false, centring_off=false;
 +    for (;;) {
 +        SDL_Delay(4);
++        pthread_mutex_lock(&haptic_lock);
++        if (haptic_closed) { pthread_mutex_unlock(&haptic_lock); return NULL; }
 +        Effect want[SLOTS]; bool used[SLOTS], playing[SLOTS]; unsigned version[SLOTS];
 +        pthread_mutex_lock(&lock);
 +        SDL_Joystick *j=current();
@@ -23135,9 +23290,11 @@ index 0000000..17da7fe
 +        const bool reading=now_us()-last_read_us<500000;
 +        const bool forces=forces_wanted;
 +        pthread_mutex_unlock(&lock);
-+        if (!haptic) continue;
++        haptic_dev=haptic;
++        if (!haptic) { pthread_mutex_unlock(&haptic_lock); continue; }
 +        if (!reading) {
 +            if (!held) { SDL_StopHapticEffects(haptic); for (int i=0;i<SLOTS;++i) live[i].running=false; held=true; }
++            pthread_mutex_unlock(&haptic_lock);
 +            continue;
 +        }
 +        held=false;
@@ -23162,8 +23319,34 @@ index 0000000..17da7fe
 +            if (playing[i] && !live[i].running) live[i].running=SDL_RunHapticEffect(haptic,live[i].id,1);
 +            else if (!playing[i] && live[i].running) { SDL_StopHapticEffect(haptic,live[i].id); live[i].running=false; }
 +        }
++        pthread_mutex_unlock(&haptic_lock);
 +    }
 +    return NULL;
++}
++
++/* Before the process ends (quit, crash report): forces stopped and the wheel released, so its driver
++ * takes it back instead of playing the last forces until another game opens it. */
++void runtime_wheel_shutdown(void) {
++    pthread_mutex_lock(&haptic_lock);
++    if (!haptic_closed) {
++        haptic_closed=true;
++        if (haptic_dev) {
++            SDL_StopHapticEffects(haptic_dev);
++            SDL_CloseHaptic(haptic_dev);
++            haptic_dev=NULL;
++            puts("Runtime: wheel forces stopped and the wheel released");
++        }
++    }
++    pthread_mutex_unlock(&haptic_lock);
++}
++
++/* The game's force parameters, logged a while: what a wheel owner's log shows when the forces feel wrong. */
++static void log_effect(const char *what, int id, const Effect *p) {
++    static unsigned logged;
++    if (logged>=60) return;
++    ++logged;
++    printf("Runtime: wheel effect %s %d: type %u duration %d a %d b %d c %d d %d e %d f %d g %d h %d\n",
++           what,id,p->type,p->duration,p->a,p->b,p->c,p->d,p->e,p->f,p->g,p->h);
 +}
 +
 +static void start_haptics(void) {   /* under lock */
@@ -23216,6 +23399,7 @@ index 0000000..17da7fe
 +    }
 +    pthread_mutex_unlock(&lock);
 +    if (free_slot<0) return LOGI_BAD_ARG;
++    log_effect("play",free_slot,p);
 +    *id=free_slot;
 +    return LOGI_OK;
 +}
@@ -23223,11 +23407,13 @@ index 0000000..17da7fe
 +    if (!p || id<0 || id>=SLOTS) return LOGI_BAD_ARG;
 +    pthread_mutex_lock(&lock);
 +    const bool ok=slot[id].used;
++    bool changed=false;
 +    if (ok) {
-+        if (memcmp(&slot[id].p,p,sizeof *p)) { slot[id].p=*p; ++slot[id].version; }
++        if (memcmp(&slot[id].p,p,sizeof *p)) { slot[id].p=*p; ++slot[id].version; changed=true; }
 +        slot[id].playing=true;
 +    }
 +    pthread_mutex_unlock(&lock);
++    if (changed) log_effect("update",id,p);
 +    return ok ? LOGI_OK : LOGI_BAD_ARG;
 +}
 +static ABI int32_t logi_stop_effect(int32_t id) {
@@ -23240,7 +23426,7 @@ index 0000000..17da7fe
 +static ABI int32_t logi_connected_only(void) { return connected() ? LOGI_OK : LOGI_NOT_CONNECTED; }
 +static ABI int32_t logi_set_range(int32_t degrees, uint8_t flag) {
 +    static unsigned told;
-+    if (told++<4) printf("Runtime: logiWheel operating range %d degrees (%u); the wheel keeps its own setting\n",degrees,flag);
++    if (told++<16) printf("Runtime: logiWheel operating range %d degrees (%u); the wheel keeps its own setting\n",degrees,flag);
 +    return logi_connected_only();
 +}
 +

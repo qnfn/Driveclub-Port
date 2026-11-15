@@ -7,6 +7,11 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.5.9
+
+- **Much less video memory (#15, #17):** every copy between a depth image and a color image asked for its own 128 MiB block of VRAM, whatever the image's size, and the blocks lived on for a while after use. On a slow card they piled up into several gigabytes, so 4-8 GB cards ran out of VRAM: constant texture swapping, stutter, low FPS and finally "device lost" (code 23). Each copy now takes only the memory it needs. Measured in the same scene: 5.7 GB of VRAM before, 3.3 GB now, with the same textures. The log's once-a-minute memory report also shows where VRAM goes now.
+- **Steering wheels (#14):** when the game closes, the wheel's forces are stopped and the wheel is released (before, the last forces kept playing until another racing game took the wheel). The log now also lists the forces the game sends and the steering range it asks for, which is needed to fix the shaking some wheels show and the steering lock.
+
 ## 0.5.8
 
 - **Intel 2nd generation CPUs (#15):** on CPUs without F16C (half-precision conversions, such as the i7-2600K and i7-2700K), the game closed right after the start (code 3). DRIVECLUB uses F16C in two small functions; the instruction translations that older CPUs get now cover it too. The translations were checked against the real instructions on a CPU that has F16C (same results bit for bit). Nothing changes on other CPUs.
