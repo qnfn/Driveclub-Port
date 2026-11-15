@@ -23148,10 +23148,10 @@ index 0000000..2501f23
 +}
 diff --git a/src/runtime_wheel.c b/src/runtime_wheel.c
 new file mode 100644
-index 0000000..a9e54e3
+index 0000000..30c0c53
 --- /dev/null
 +++ b/src/runtime_wheel.c
-@@ -0,0 +1,449 @@
+@@ -0,0 +1,521 @@
 +/* DCport: steering wheels. DRIVECLUB has its own Logitech wheel support: it links logiWheel.prx and,
 + * whenever logiWheelReadState says a wheel is there, steers with it and plays its forces through it.
 + * That library talks to USB devices this runtime does not have, so the game never saw a wheel. Here
@@ -23171,12 +23171,15 @@ index 0000000..a9e54e3
 + *   BB_WHEEL_AXES  steering,accelerator,brake,clutch axis numbers (default 0,1,2,3; -1 none)
 + *   BB_WHEEL_FFB   force feedback strength in percent (default 100, 0 off)
 + *   BB_WHEEL_FFB_INVERT=1  forces the other way round
++ *   BB_WHEEL_FFB_SPRING  soft (default): the game's spring becomes a smoothed force worked out here;
++ *                  wheel: the game's spring goes to the wheel's driver as it is (shook a G923, #14)
 + *   BB_WHEEL_BUTTONS  <wheel button>:<pad button>,... (cross circle square triangle l1 r1 l2 r2
 + *                  l3 r3 options touchpad up down left right); default: a Logitech G29/G923 layout
 + */
 +#define _GNU_SOURCE
 +#include "runtime.h"
 +#include <SDL3/SDL.h>
++#include <math.h>
 +#include <pthread.h>
 +#include <stdbool.h>
 +#include <stdio.h>
@@ -23206,6 +23209,7 @@ index 0000000..a9e54e3
 +static int axis[AX_COUNT]={0,1,2,3};
 +static int ffb_percent=100;
 +static int ffb_sign=1;
++static bool soft_spring=true;
 +static struct { int button; uint32_t pad; } buttons[32];
 +static int button_count;
 +
@@ -23260,6 +23264,7 @@ index 0000000..a9e54e3
 +        sscanf(e,"%d,%d,%d,%d",&axis[AX_STEER],&axis[AX_ACCEL],&axis[AX_BRAKE],&axis[AX_CLUTCH]);
 +    if ((e=getenv("BB_WHEEL_FFB")) && *e) ffb_percent=clampi(atoi(e),0,200);
 +    if ((e=getenv("BB_WHEEL_FFB_INVERT")) && *e=='1') ffb_sign=-1;
++    if ((e=getenv("BB_WHEEL_FFB_SPRING")) && !SDL_strcasecmp(e,"wheel")) soft_spring=false;
 +    e=getenv("BB_WHEEL_BUTTONS");
 +    parse_buttons(e && *e ? e : default_buttons);
 +}
@@ -23404,6 +23409,64 @@ index 0000000..a9e54e3
 +    return type==0 ? SDL_HAPTIC_CONSTANT : type==2 ? SDL_HAPTIC_SINE : type==7 ? SDL_HAPTIC_SPRING : type==8 ? SDL_HAPTIC_DAMPER : 0;
 +}
 +
++/* The game's spring (type 7) is its steering feel: the stiffest spring there is, its centre moved every
++ * frame to where the tyres want the wheel. Sent to the wheel's driver like that, a G923 shook whenever
++ * the wheel was off that centre (#14). Here it becomes one constant force instead: the same pull
++ * (coefficient times the distance, up to the saturation), toward a centre smoothed over ~25 ms, sent
++ * only when it changes. A wheel that keeps speeding up away from the centre is being pushed the wrong
++ * way: then the game's spring goes to the driver again. pos: the wheel on the game's scale (+: right). */
++static struct { int id; bool running, init, failed; float target; Sint16 sent; int32_t last_pos; uint64_t last_us; int runaway; } soft={.id=-1};
++
++static void soft_spring_off(SDL_Haptic *haptic, const char *why) {
++    if (soft.id>=0) { SDL_DestroyHapticEffect(haptic,soft.id); soft.id=-1; }
++    soft.running=soft.init=false; soft.failed=true;
++    printf("Runtime: wheel spring worked out here off (%s); the game's spring goes to the wheel\n",why);
++}
++
++static void soft_spring_pass(SDL_Haptic *haptic, const Effect *spring, int32_t pos) {
++    if (!spring) {
++        if (soft.running) { SDL_StopHapticEffect(haptic,soft.id); soft.running=false; }
++        soft.init=false;
++        return;
++    }
++    const uint64_t now=now_us();
++    float dt=soft.last_us ? (float)(now-soft.last_us)*1e-6f : 0.004f;
++    dt=dt<0.0005f ? 0.0005f : dt>0.05f ? 0.05f : dt;
++    soft.last_us=now;
++    if (!soft.init) { soft.target=(float)spring->a; soft.last_pos=pos; soft.runaway=0; soft.init=true; }
++    soft.target+=((float)spring->a-soft.target)*(1.0f-expf(-dt/0.025f));
++    const float off=(soft.target-(float)pos)/32767.0f;            /* +: the centre is to the right */
++    const int coeff=off>0 ? spring->c : spring->d, sat=off>0 ? spring->e : spring->f;
++    float force=off*(float)clampi(coeff,-255,255)/255.0f;
++    const float cap=(float)clampi(sat,0,255)/255.0f;
++    force=force>cap ? cap : force<-cap ? -cap : force;
++    force*=(float)ffb_percent/100.0f;
++    /* moving fast away from the centre, pass after pass, while pushed hard: the force goes the wrong way */
++    const int32_t vel=pos-soft.last_pos; soft.last_pos=pos;
++    const bool away=vel && ((float)pos>soft.target)==(vel>0);
++    if (away && fabsf((float)vel/dt)>40000.0f && fabsf(force)>0.2f) {
++        if (++soft.runaway>=8) { soft_spring_off(haptic,"the wheel sped up against the force"); return; }
++    } else soft.runaway=0;
++    /* a positive constant force turns a wheel left through DirectInput */
++    const int level=clampi((int)lroundf(-force*32767.0f)*ffb_sign,-32767,32767);
++    SDL_HapticEffect e;
++    memset(&e,0,sizeof e);
++    e.type=SDL_HAPTIC_CONSTANT;
++    e.constant.direction.type=SDL_HAPTIC_CARTESIAN; e.constant.direction.dir[0]=1;
++    e.constant.length=SDL_HAPTIC_INFINITY;
++    e.constant.level=(Sint16)level;
++    if (soft.id<0) {
++        if (!(SDL_GetHapticFeatures(haptic) & SDL_HAPTIC_CONSTANT) || (soft.id=SDL_CreateHapticEffect(haptic,&e))<0) {
++            soft_spring_off(haptic,"no constant force on this wheel"); return;
++        }
++        soft.sent=e.constant.level;
++        printf("Runtime: wheel spring worked out here (smoothed; wheel_ffb_spring=wheel sends the game's spring)\n");
++    } else if (abs(e.constant.level-soft.sent)>=32 && SDL_UpdateHapticEffect(haptic,soft.id,&e)) {
++        soft.sent=e.constant.level;
++    }
++    if (!soft.running) soft.running=SDL_RunHapticEffect(haptic,soft.id,1);
++}
++
 +static void *haptic_thread(void *unused) {
 +    (void)unused;
 +    SDL_Haptic *haptic=NULL;
@@ -23421,6 +23484,7 @@ index 0000000..a9e54e3
 +        if (j && (!haptic || owner!=wheel_id)) {
 +            if (haptic) SDL_CloseHaptic(haptic);
 +            for (int i=0;i<SLOTS;++i) live[i].id=-1;
++            soft.id=-1; soft.running=soft.init=false;
 +            haptic=SDL_OpenHapticFromJoystick(j);
 +            owner=wheel_id; centring_off=false;
 +            if (haptic) {
@@ -23433,11 +23497,12 @@ index 0000000..a9e54e3
 +        /* The game stopped reading the wheel (paused, loading, closing): no forces until it reads again. */
 +        const bool reading=now_us()-last_read_us<500000;
 +        const bool forces=forces_wanted;
++        const int32_t pos=j ? (int32_t)value(AX_STEER)-32768 : 0;
 +        pthread_mutex_unlock(&lock);
 +        haptic_dev=haptic;
 +        if (!haptic) { pthread_mutex_unlock(&haptic_lock); continue; }
 +        if (!reading) {
-+            if (!held) { SDL_StopHapticEffects(haptic); for (int i=0;i<SLOTS;++i) live[i].running=false; held=true; }
++            if (!held) { SDL_StopHapticEffects(haptic); for (int i=0;i<SLOTS;++i) live[i].running=false; soft.running=soft.init=false; held=true; }
 +            pthread_mutex_unlock(&haptic_lock);
 +            continue;
 +        }
@@ -23446,8 +23511,14 @@ index 0000000..a9e54e3
 +            centring_off=true;
 +            if (SDL_GetHapticFeatures(haptic) & SDL_HAPTIC_AUTOCENTER) SDL_SetHapticAutocenter(haptic,0);
 +        }
++        const Effect *spring=NULL;
 +        for (int i=0;i<SLOTS;++i) {
 +            if (!used[i]) continue;
++            if (soft_spring && !soft.failed && want[i].type==7) {
++                if (live[i].id>=0) { SDL_DestroyHapticEffect(haptic,live[i].id); live[i].id=-1; }
++                if (playing[i]) spring=&want[i];
++                continue;
++            }
 +            if (live[i].id>=0 && live[i].type!=want[i].type) { SDL_DestroyHapticEffect(haptic,live[i].id); live[i].id=-1; }
 +            if (live[i].id<0 || live[i].version!=version[i]) {
 +                SDL_HapticEffect e;
@@ -23463,6 +23534,7 @@ index 0000000..a9e54e3
 +            if (playing[i] && !live[i].running) live[i].running=SDL_RunHapticEffect(haptic,live[i].id,1);
 +            else if (!playing[i] && live[i].running) { SDL_StopHapticEffect(haptic,live[i].id); live[i].running=false; }
 +        }
++        if (soft_spring && !soft.failed) soft_spring_pass(haptic,spring,pos);
 +        pthread_mutex_unlock(&haptic_lock);
 +    }
 +    return NULL;

@@ -125,7 +125,8 @@ def session_upscale(paths: AppPaths, s: LauncherSettings, fsr: bool) -> float:
 
 
 WHEEL_KEYS = (("wheel", "BB_WHEEL"), ("wheel_axes", "BB_WHEEL_AXES"), ("wheel_ffb", "BB_WHEEL_FFB"),
-              ("wheel_ffb_invert", "BB_WHEEL_FFB_INVERT"), ("wheel_buttons", "BB_WHEEL_BUTTONS"))
+              ("wheel_ffb_invert", "BB_WHEEL_FFB_INVERT"), ("wheel_ffb_spring", "BB_WHEEL_FFB_SPRING"),
+              ("wheel_buttons", "BB_WHEEL_BUTTONS"))
 
 
 def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
@@ -184,6 +185,7 @@ def game_env(paths: AppPaths, s: LauncherSettings, fsr: bool,
         env["BB_DC_UI_FIT"] = "0"
     # Steering wheels (runtime wheel support): dcport.ini wheel (auto/off/part of the name),
     # wheel_axes (steering,accelerator,brake,clutch), wheel_ffb (percent), wheel_ffb_invert (0/1),
+    # wheel_ffb_spring (soft, or wheel: the game's spring sent to the wheel as it is),
     # wheel_buttons (<button>:<pad button>,...). Missing lines keep the runtime's defaults.
     for key, name in WHEEL_KEYS:
         env.pop(name, None)

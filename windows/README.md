@@ -7,6 +7,10 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.6.1
+
+- **Steering wheels (#14):** DRIVECLUB steers a Logitech wheel with a very stiff spring whose centre moves every frame to where the tyres want the wheel. Sent to the wheel as it is, some wheels (a G923) shook as soon as they were turned a little. DCport now works that force out itself and sends the wheel a smooth version of it. If a wheel feels wrong with it, `wheel_ffb_spring=wheel` in `dcport.ini` sends the game's spring as before; the log says which one is used.
+
 ## 0.6.0
 
 - **Fewer GPU hangs (#17):** a pixel shader whose loop runs away (its end comes from game data) now stops after 4096 rounds instead of keeping the graphics card busy until Windows resets the driver ("device lost", code 23). All shaders are rebuilt once at the first start (a few more short stutters than usual).
