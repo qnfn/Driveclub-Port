@@ -7,6 +7,11 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.6.0
+
+- **Fewer GPU hangs (#17):** a pixel shader whose loop runs away (its end comes from game data) now stops after 4096 rounds instead of keeping the graphics card busy until Windows resets the driver ("device lost", code 23). All shaders are rebuilt once at the first start (a few more short stutters than usual).
+- **Better crash reports:** when the graphics card stops responding, the log now names the draw or compute job it was running, with its shaders, also when the loss is first noticed while showing a frame.
+
 ## 0.5.9
 
 - **Much less video memory (#15, #17):** every copy between a depth image and a color image asked for its own 128 MiB block of VRAM, whatever the image's size, and the blocks lived on for a while after use. On a slow card they piled up into several gigabytes, so 4-8 GB cards ran out of VRAM: constant texture swapping, stutter, low FPS and finally "device lost" (code 23). Each copy now takes only the memory it needs. Measured in the same scene: 5.7 GB of VRAM before, 3.3 GB now, with the same textures. The log's once-a-minute memory report also shows where VRAM goes now.

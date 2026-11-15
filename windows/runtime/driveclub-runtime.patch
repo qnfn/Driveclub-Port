@@ -1663,6 +1663,34 @@ index 432c3a4..2a9a3a5 100644
 +}
 +
 +} // namespace Libraries::VideoOut
+diff --git a/gpu/shadps4/shader_recompiler/backend/spirv/emit_spirv.cpp b/gpu/shadps4/shader_recompiler/backend/spirv/emit_spirv.cpp
+index e6ee2b1..1e88c4e 100644
+--- a/gpu/shadps4/shader_recompiler/backend/spirv/emit_spirv.cpp
++++ b/gpu/shadps4/shader_recompiler/backend/spirv/emit_spirv.cpp
+@@ -198,6 +198,23 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
+             break;
+         case IR::AbstractSyntaxNode::Type::Repeat: {
+             Id cond{ctx.Def(node.data.repeat.cond)};
++            if (ctx.info.sw_stage == SwStage::Fragment) {
++                // Loop guard: a pixel shader whose loop bound comes from game data can spin
++                // for billions of iterations when that data is wrong, and the driver then
++                // resets the GPU (device lost). Cap the loop back-edges of one invocation.
++                constexpr u32 MaxFragmentLoopIterations = 4096;
++                if (!Sirit::ValidId(ctx.loop_guard)) {
++                    ctx.loop_guard = ctx.DefineVariable(ctx.U32[1], std::nullopt,
++                                                       spv::StorageClass::Private,
++                                                       ctx.u32_zero_value);
++                }
++                const Id count{ctx.OpIAdd(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.loop_guard),
++                                          ctx.ConstU32(1u))};
++                ctx.OpStore(ctx.loop_guard, count);
++                cond = ctx.OpLogicalAnd(
++                    ctx.U1[1], cond,
++                    ctx.OpULessThan(ctx.U1[1], count, ctx.ConstU32(MaxFragmentLoopIterations)));
++            }
+             const Id loop_header_label{node.data.repeat.loop_header->Definition<Id>()};
+             const Id merge_label{node.data.repeat.merge->Definition<Id>()};
+             ctx.OpBranchConditional(cond, loop_header_label, merge_label);
 diff --git a/gpu/shadps4/shader_recompiler/backend/spirv/emit_spirv_image.cpp b/gpu/shadps4/shader_recompiler/backend/spirv/emit_spirv_image.cpp
 index 28904ba..216facc 100644
 --- a/gpu/shadps4/shader_recompiler/backend/spirv/emit_spirv_image.cpp
@@ -1692,6 +1720,18 @@ index 28904ba..216facc 100644
      ctx.OpImageWrite(image, fixed_coords, texel, operands.mask, operands.operands);
  }
  
+diff --git a/gpu/shadps4/shader_recompiler/backend/spirv/spirv_emit_context.h b/gpu/shadps4/shader_recompiler/backend/spirv/spirv_emit_context.h
+index f53769e..c38c657 100644
+--- a/gpu/shadps4/shader_recompiler/backend/spirv/spirv_emit_context.h
++++ b/gpu/shadps4/shader_recompiler/backend/spirv/spirv_emit_context.h
+@@ -244,6 +244,7 @@ public:
+     Id gl_in{};
+ 
+     boost::container::small_vector<Id, 16> interfaces;
++    Id loop_guard{};
+ 
+     Id output_position{};
+     Id output_point_size{};
 diff --git a/gpu/shadps4/shader_recompiler/frontend/control_flow_graph.cpp b/gpu/shadps4/shader_recompiler/frontend/control_flow_graph.cpp
 index f38f077..91898f4 100644
 --- a/gpu/shadps4/shader_recompiler/frontend/control_flow_graph.cpp
@@ -4626,10 +4666,10 @@ index 4dd46cf..b61fb7f 100644
      auto [width, height] = cur_size;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.cpp
 new file mode 100644
-index 0000000..bcd8930
+index 0000000..1222d1e
 --- /dev/null
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.cpp
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,479 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 +
@@ -4656,6 +4696,31 @@ index 0000000..bcd8930
 +vk::Buffer buffer{};
 +std::array<std::atomic<u32>, SiteCount> sequence{};
 +std::atomic<bool> reported{false};
++
++// DCport: the latest game draws and dispatches by number (NoteWork), read after a device loss.
++struct WorkItem {
++    std::atomic<u32> number{0}; ///< written last: the entry belongs to this number
++    char kind{};
++    u64 shader0{}, shader1{};
++    u32 size0{}, size1{};
++};
++constexpr u32 WorkRing = 8192;
++std::array<WorkItem, WorkRing> work_items;
++std::atomic<u32> work_number{0};
++
++void PrintWork(u32 number) {
++    const WorkItem& w = work_items[number % WorkRing];
++    if (w.number.load(std::memory_order_acquire) != number) {
++        std::printf("    #%u (no longer recorded)\n", number);
++    } else if (w.kind == 'c') {
++        std::printf("    #%u dispatch cs %016llx, %u x %u groups\n", number,
++                    (unsigned long long)w.shader0, w.size0, w.size1);
++    } else {
++        std::printf("    #%u draw vs %016llx ps %016llx, %u indices x %u instances%s\n", number,
++                    (unsigned long long)w.shader0, (unsigned long long)w.shader1, w.size0,
++                    w.size1, w.kind == 'i' ? " (indirect)" : "");
++    }
++}
 +// DCport: VK_EXT_device_fault, for the faulting address after a loss.
 +VkDevice fault_device = VK_NULL_HANDLE;
 +PFN_vkGetDeviceFaultInfoEXT get_fault_info = nullptr;
@@ -4919,6 +4984,7 @@ index 0000000..bcd8930
 +    case FrameGen: return "frame generation";
 +    case Present: return "present blit";
 +    case HudlessCopy: return "HUD-less copy";
++    case Work: return "game draw/dispatch";
 +    default: return "other";
 +    }
 +}
@@ -5008,15 +5074,59 @@ index 0000000..bcd8930
 +                                (site * 2 + 1) * sizeof(u32), seq);
 +}
 +
++u32 NoteWork(char kind, u64 shader0, u64 shader1, u32 size0, u32 size1) {
++    if (!slots) {
++        return 0;
++    }
++    const u32 number = work_number.fetch_add(1, std::memory_order_relaxed) + 1;
++    WorkItem& w = work_items[number % WorkRing];
++    w.number.store(0, std::memory_order_relaxed);
++    w.kind = kind;
++    w.shader0 = shader0;
++    w.shader1 = shader1;
++    w.size0 = size0;
++    w.size1 = size1;
++    w.number.store(number, std::memory_order_release);
++    return number;
++}
++
++void WorkBegin(vk::CommandBuffer cmdbuf, u32 number) {
++    if (slots && number) {
++        cmdbuf.writeBufferMarkerAMD(vk::PipelineStageFlagBits::eTopOfPipe, buffer,
++                                    Work * 2 * sizeof(u32), number);
++    }
++}
++
++void WorkEnd(vk::CommandBuffer cmdbuf, u32 number) {
++    if (slots && number) {
++        cmdbuf.writeBufferMarkerAMD(vk::PipelineStageFlagBits::eBottomOfPipe, buffer,
++                                    (Work * 2 + 1) * sizeof(u32), number);
++    }
++}
++
 +void Report() {
 +    if (reported.exchange(true)) {
 +        return;
 +    }
 +    if (slots) {
 +        std::printf("GPU markers at the device loss (started / finished / recorded):\n");
++        if (const u32 recorded = work_number.load()) {
++            const u32 started = slots[Work * 2], finished = slots[Work * 2 + 1];
++            std::printf("  game draws/dispatches: last started #%u, last finished #%u, recorded "
++                        "#%u\n",
++                        started, finished, recorded);
++            if (started != finished) {
++                // The GPU finishes them in order: the first unfinished one is where it stopped.
++                std::printf("  running on the GPU:\n");
++                const u32 last = std::min({started, finished + 4, recorded});
++                for (u32 n = finished + 1; n <= last && n != 0; ++n) {
++                    PrintWork(n);
++                }
++            }
++        }
 +        for (u32 site = 0; site < SiteCount; ++site) {
 +            const u32 recorded = sequence[site].load();
-+            if (!recorded) {
++            if (!recorded || site == Work) {
 +                continue;
 +            }
 +            const u32 started = slots[site * 2], finished = slots[site * 2 + 1];
@@ -5041,10 +5151,10 @@ index 0000000..bcd8930
 +} // namespace Vulkan::Breadcrumbs
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.h b/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.h
 new file mode 100644
-index 0000000..0187a0a
+index 0000000..04426ed
 --- /dev/null
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,52 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#pragma once
 +
@@ -5070,12 +5180,20 @@ index 0000000..0187a0a
 +    FrameGen = 9,
 +    Present = 10,
 +    HudlessCopy = 11,
++    Work = 12, ///< the game's draws and dispatches (NoteWork / WorkBegin / WorkEnd)
 +    SiteCount = 16,
 +};
 +
 +void Init(const Instance& instance);
 +void Begin(vk::CommandBuffer cmdbuf, u32 site);
 +void End(vk::CommandBuffer cmdbuf, u32 site);
++/// DCport: one of the game's draws ('d', 'i' indirect) or dispatches ('c') with its shaders and
++/// sizes; returns its number (0 with the markers off). WorkBegin/WorkEnd recorded around it with
++/// that number let Report name the work the GPU was running at a device loss, which a hang (no
++/// faulting address) does not tell otherwise.
++u32 NoteWork(char kind, u64 shader0, u64 shader1, u32 size0, u32 size1);
++void WorkBegin(vk::CommandBuffer cmdbuf, u32 number);
++void WorkEnd(vk::CommandBuffer cmdbuf, u32 number);
 +/// Prints where the GPU was (once); call before reporting a device loss.
 +void Report();
 +/// DCport: names a GPU address range in fault reports (ranges the driver's address log does not
@@ -6507,10 +6625,10 @@ index 6135cbe..56da3f0 100644
          info.AddBindings(binding);
          module = it->module;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
-index 8b6f955..8cd0545 100644
+index 8b6f955..2dbe1fb 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
-@@ -14,7 +14,11 @@ namespace Serialization {
+@@ -14,7 +14,12 @@ namespace Serialization {
  /* You should increment versions below once corresponding serialization scheme is changed. */
  // bbport: past both histories (port 7/7/5, upstream 0.20.1 9/6/3): caches of either are rebuilt.
  // 11: the push data block covers all 56 buffer offsets (shaders of 10 read some out of bounds).
@@ -6519,11 +6637,12 @@ index 8b6f955..8cd0545 100644
 +// DCport 13: CFG fallthrough edges kept (shadPS4 #5365).
 +// DCport 15: permutation indices are never reused across sessions (14 caches could pair a
 +// pipeline with another permutation's shader: graphics bugs until the cache was deleted).
-+static constexpr u32 ShaderBinaryVersion = 15u;
++// DCport 16: pixel shader loops stop after 4096 back-edges per invocation (GPU hang, #17).
++static constexpr u32 ShaderBinaryVersion = 16u;
  static constexpr u32 ShaderMetaVersion = 8u;
  static constexpr u32 PipelineKeyVersion = 6u;
  } // namespace Serialization
-@@ -93,6 +97,11 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
+@@ -93,6 +98,11 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
                                         std::move(spv));
  }
  
@@ -6535,7 +6654,7 @@ index 8b6f955..8cd0545 100644
  bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
                      Shader::StageSpecialization& spec, size_t& perm_idx) {
      Serialization::Reader meta{ar};
-@@ -340,37 +349,36 @@ void PipelineCache::WarmUp() {
+@@ -340,37 +350,36 @@ void PipelineCache::WarmUp() {
  
      Storage::DataBase::Instance().Open();
  
@@ -6656,10 +6775,10 @@ index e5e14b1..79439cd 100644
          cmdbuf.endDebugUtilsLabelEXT();
      }
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-index 2bf5a5d..763e894 100644
+index 2bf5a5d..9e3fd56 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp
-@@ -1,3734 +1,4713 @@
+@@ -1,3734 +1,4730 @@
 -// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 -// SPDX-License-Identifier: GPL-2.0-or-later
 -
@@ -11898,13 +12017,18 @@ index 2bf5a5d..763e894 100644
 +    const u32 num_instances = regs.num_instances.NumInstances();
 +    const u32 first_vertex = vertex_offset;
 +    const u32 first_instance = instance_offset;
++    const auto* ps_stage = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
++    const u32 work = Breadcrumbs::NoteWork('d', vs_info.pgm_hash, ps_stage ? ps_stage->pgm_hash : 0,
++                                           num_indices, num_instances);
 +    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
 +        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
++        Breadcrumbs::WorkBegin(cmdbuf, work);
 +        if (is_indexed) {
 +            cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex), first_instance);
 +        } else {
 +            cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
 +        }
++        Breadcrumbs::WorkEnd(cmdbuf, work);
 +    });
 +    if (FrameCapture::Active()) {
 +        const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
@@ -12033,8 +12157,12 @@ index 2bf5a5d..763e894 100644
 +    const u64 args_offset = base;
 +    const vk::Buffer counts = count_address != 0 ? count_buffer->Handle() : vk::Buffer{};
 +    const u64 counts_offset = count_address != 0 ? count_offset : 0;
++    const auto* ps_stage = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
++    const u32 work = Breadcrumbs::NoteWork('i', pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
++                                           ps_stage ? ps_stage->pgm_hash : 0, max_count, 0);
 +    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
 +        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
++        Breadcrumbs::WorkBegin(cmdbuf, work);
 +        if (is_indexed) {
 +            if (counts) {
 +                cmdbuf.drawIndexedIndirectCount(args, args_offset, counts, counts_offset, max_count,
@@ -12047,6 +12175,7 @@ index 2bf5a5d..763e894 100644
 +        } else {
 +            cmdbuf.drawIndirect(args, args_offset, max_count, stride);
 +        }
++        Breadcrumbs::WorkEnd(cmdbuf, work);
 +    });
 +    DebugState.IncDrawCall();
 +
@@ -12292,9 +12421,12 @@ index 2bf5a5d..763e894 100644
 +                        dim_y * ty, images.c_str());
 +        }
 +    }
++    const u32 work = Breadcrumbs::NoteWork('c', cs.pgm_hash, 0, dim_x, dim_y * dim_z);
 +    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
 +        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
++        Breadcrumbs::WorkBegin(cmdbuf, work);
 +        cmdbuf.dispatch(dim_x, dim_y, dim_z);
++        Breadcrumbs::WorkEnd(cmdbuf, work);
 +    });
 +    DebugState.IncDispatch();
 +
@@ -12345,9 +12477,13 @@ index 2bf5a5d..763e894 100644
 +    const vk::Pipeline handle = pipeline->Handle();
 +    const vk::Buffer args = buffer->Handle();
 +    const u64 args_offset = base;
++    const u32 work = Breadcrumbs::NoteWork(
++        'c', pipeline->GetStage(Shader::SwStage::Compute).pgm_hash, 0, 0, 0);
 +    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
 +        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
++        Breadcrumbs::WorkBegin(cmdbuf, work);
 +        cmdbuf.dispatchIndirect(args, args_offset);
++        Breadcrumbs::WorkEnd(cmdbuf, work);
 +    });
 +    DebugState.IncDispatch();
 +
@@ -16484,7 +16620,7 @@ index 8519c07..843cae1 100644
      Scheduler& scheduler;
  
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
-index 0a2fea3..47435e6 100644
+index 0a2fea3..42369e6 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
 @@ -9,6 +9,7 @@
@@ -16506,7 +16642,15 @@ index 0a2fea3..47435e6 100644
          LOG_CRITICAL(Render_Vulkan, "Swapchain acquire returned unknown result {}",
                       vk::to_string(result));
          UNREACHABLE();
-@@ -145,7 +150,7 @@ bool Swapchain::Present() {
+@@ -141,11 +146,15 @@ bool Swapchain::Present() {
+     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
+         needs_recreation = true;
+     } else {
++        // DCport: a GPU hang often shows here first; print the markers before stopping (#17).
++        if (result == vk::Result::eErrorDeviceLost) {
++            instance.ReportDeviceLost("present");
++        }
+         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
                     vk::to_string(result));
      }
  
@@ -16515,7 +16659,7 @@ index 0a2fea3..47435e6 100644
  
      return !needs_recreation;
  }
-@@ -286,7 +291,11 @@ void Swapchain::Destroy() {
+@@ -286,7 +295,11 @@ void Swapchain::Destroy() {
  
  void Swapchain::RefreshSemaphores() {
      const vk::Device device = instance.GetDevice();
