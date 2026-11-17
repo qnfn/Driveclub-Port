@@ -2212,7 +2212,7 @@ index 1211eb6..8773fa4 100644
          ++wait_cursor;
      }
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-index 53525a9..0f4622b 100644
+index 53525a9..f36af54 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 @@ -4,13 +4,21 @@
@@ -3026,7 +3026,46 @@ index 53525a9..0f4622b 100644
  
      const vk::MemoryAllocateFlagsInfo alloc_flags = {
          .flags = vk::MemoryAllocateFlagBits::eDeviceAddress,
-@@ -914,7 +1605,21 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
+@@ -625,7 +1316,12 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
+     static u64 arena_allocated = 0;
+     vk::Result alloc_result = vk::Result::eErrorOutOfDeviceMemory;
+     vk::DeviceMemory device_memory{};
+-    if (!arena_limit || arena_allocated + alloc_info.allocationSize <= arena_limit) {
++    // DCport (#17): past the driver's budget, go straight to the system memory fallback below
++    // instead of letting the driver evict for room (multi-second stalls -> device lost).
++    const u32 arena_heap =
++        instance.GetMemoryProperties().memoryTypes[arena_memory_type_index].heapIndex;
++    const bool over_budget = instance.WouldExceedBudget(arena_heap, alloc_info.allocationSize);
++    if (!over_budget && (!arena_limit || arena_allocated + alloc_info.allocationSize <= arena_limit)) {
+         std::tie(alloc_result, device_memory) = instance.GetDevice().allocateMemory(alloc_info);
+         if (alloc_result == vk::Result::eSuccess) {
+             arena_allocated += alloc_info.allocationSize;
+@@ -663,11 +1359,19 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
+                 std::fflush(stdout);
+             }
+         } else {
+-            std::printf("GPU: video memory full: no room for %llu MiB of game memory (only VRAM "
+-                        "can hold it on this GPU). A lower output resolution or upscaler preset "
+-                        "needs less.\n",
+-                        static_cast<unsigned long long>(alloc_info.allocationSize >> 20));
+-            std::fflush(stdout);
++            if (over_budget) {
++                // Nothing outside VRAM and no reserve left: VRAM past the budget, as before #17.
++                alloc_info.memoryTypeIndex = arena_memory_type_index;
++                std::tie(alloc_result, device_memory) =
++                    instance.GetDevice().allocateMemory(alloc_info);
++            }
++            if (alloc_result != vk::Result::eSuccess) {
++                std::printf("GPU: video memory full: no room for %llu MiB of game memory (only "
++                            "VRAM can hold it on this GPU). A lower output resolution or upscaler "
++                            "preset needs less.\n",
++                            static_cast<unsigned long long>(alloc_info.allocationSize >> 20));
++                std::fflush(stdout);
++            }
+         }
+     }
+     device_memory = Vulkan::Check(vk::ResultValue<vk::DeviceMemory>{alloc_result, device_memory});
+@@ -914,7 +1618,21 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
      };
  
      info.AddWait(signal_sema, signal_tick);
@@ -6519,7 +6558,7 @@ index 0000000..cf9ce4c
 +
 +} // namespace Vulkan
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
-index c707b15..726fd3f 100644
+index c707b15..2a1bec3 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.cpp
 @@ -13,6 +13,8 @@
@@ -6716,8 +6755,43 @@ index c707b15..726fd3f 100644
      return true;
  }
  
+@@ -775,8 +809,14 @@ void Instance::CreateAllocator() {
+         .vkGetDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr,
+     };
+ 
++    // DCport (#17): with the budget extension VMA's WITHIN_BUDGET checks use the driver's real
++    // usage, which counts the buffer cache's own allocations too (outside VMA, 1-2 GB).
++    VmaAllocatorCreateFlags flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
++    if (supports_memory_budget) {
++        flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
++    }
+     const VmaAllocatorCreateInfo allocator_info = {
+-        .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
++        .flags = flags,
+         .physicalDevice = physical_device,
+         .device = *device,
+         .pVulkanFunctions = &functions,
+@@ -957,6 +997,18 @@ u64 Instance::GetDeviceMemoryBudgetNow() const {
+     return total_budget;
+ }
+ 
++bool Instance::WouldExceedBudget(u32 heap, u64 size) const {
++    if (!supports_memory_budget) {
++        return false;
++    }
++    vk::PhysicalDeviceMemoryBudgetPropertiesEXT memory_budget_props{};
++    vk::PhysicalDeviceMemoryProperties2 props = {
++        .pNext = &memory_budget_props,
++    };
++    physical_device.getMemoryProperties2(&props);
++    return memory_budget_props.heapUsage[heap] + size > memory_budget_props.heapBudget[heap];
++}
++
+ vk::FormatFeatureFlags2 Instance::GetFormatFeatureFlags(vk::Format format) const {
+     const auto it = format_properties.find(format);
+     if (it == format_properties.end()) {
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
-index 8c97d25..cc334f9 100644
+index 8c97d25..8291c2a 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_instance.h
 @@ -3,6 +3,7 @@
@@ -6792,7 +6866,19 @@ index 8c97d25..cc334f9 100644
      }
  
      /// VK_KHR_shader_clock is supported.
-@@ -589,8 +635,11 @@ private:
+@@ -505,6 +551,11 @@ public:
+     /// (VK_EXT_memory_budget: what this process can use now, other processes included).
+     [[nodiscard]] u64 GetDeviceMemoryBudgetNow() const;
+ 
++    /// DCport (#17): whether `size` more bytes in `heap` would pass the driver's budget now.
++    /// Past it, AMD's Windows driver makes room by evicting before it returns: seconds-long
++    /// stalls that ended in a device loss on an 8 GB RX 580. False without VK_EXT_memory_budget.
++    [[nodiscard]] bool WouldExceedBudget(u32 heap, u64 size) const;
++
+     /// Returns the total memory budget available to the device.
+     [[nodiscard]] u64 GetTotalMemoryBudget() const {
+         return total_memory_budget;
+@@ -589,8 +640,11 @@ private:
      bool image_2d_view_of_3d{};
      bool image_view_min_lod{};
      bool shader_clock{};

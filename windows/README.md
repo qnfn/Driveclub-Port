@@ -7,6 +7,10 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.6.3
+
+- **No more seconds-long freezes when video memory is full (#17):** game memory that the GPU uses was taken from VRAM without asking how much the driver can still give. Near the limit (here an 8 GB RX 580 at 6.0 of 6.3 GB), AMD's Windows driver first moved other memory out to make room, which took seconds; Windows then reset the driver ("device lost", code 23). Past the driver's limit, that memory now comes from system memory (slower, but no freeze), and textures check the real VRAM use too.
+
 ## 0.6.2
 
 - **Intro video fixed at 60 and 75 FPS (#15):** single frames of the intro came out of order (a shot from before a cut showed again after it). The video player handed each frame's memory back to the decoder as soon as the game asked for the next frame, while the GPU side still had to draw it; a later picture could land there first. Frames now stay untouched for three more frames. Measured on the intro at 75 FPS: 10 out-of-order frames before, none after; 30 FPS plays as before.
