@@ -7,6 +7,12 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.6.2
+
+- **Intro video fixed at 60 and 75 FPS (#15):** single frames of the intro came out of order (a shot from before a cut showed again after it). The video player handed each frame's memory back to the decoder as soon as the game asked for the next frame, while the GPU side still had to draw it; a later picture could land there first. Frames now stay untouched for three more frames. Measured on the intro at 75 FPS: 10 out-of-order frames before, none after; 30 FPS plays as before.
+- **Mods (experimental):** SETUP > Mods (On / Off) and "Open mods folder". Put each mod in its own folder inside `mods`, laid out like the game folder (`CUSA00003` or `CUSA00093`): its files replace the game's files of the same name and path, and new files are added (DRIVECLUB looks for loose files before its archives). When two mods have the same file, the folder whose name comes first wins; a folder name starting with `_` switches that mod off. The log lists the files taken from mods. Off by default.
+- **Better crash reports for graphics freezes (#17):** when the game stops showing frames or the driver reports "device lost", the log now names what the GPU side was waiting for (a submission, a memory binding, the swapchain).
+
 ## 0.6.1
 
 - **Steering wheels (#14):** DRIVECLUB steers a Logitech wheel with a very stiff spring whose centre moves every frame to where the tyres want the wheel. Sent to the wheel as it is, some wheels (a G923) shook as soon as they were turned a little. DCport now works that force out itself and sends the wheel a smooth version of it. If a wheel feels wrong with it, `wheel_ffb_spring=wheel` in `dcport.ini` sends the game's spring as before; the log says which one is used.
@@ -229,7 +235,7 @@ No game files are included. You need your own dump of DRIVECLUB 01.28, EU (CUSA0
 2. The first time, choose your game folder. On the first PLAY, DCport prepares the game files on your PC (once, under a minute).
 3. The launcher has six tabs:
    - **RACE**: game art, ready checks, PLAY, quick frame rate, window and FPS counter
-   - **SETUP**: game folder, player name, language, frame rate (30–240, tested up to 120), window mode and size, aspect ratio and UI fit, FPS counter, threading, controller buttons (Xbox 360 / Xbox One / PS4 / PS5); FSR edition: anti-aliasing (FSR 3.1 / FSR 4.1.2 / DLSS), scaling, sharpness
+   - **SETUP**: game folder, player name, language, frame rate (30–240, tested up to 120), window mode and size, aspect ratio and UI fit, FPS counter, threading, controller buttons (Xbox 360 / Xbox One / PS4 / PS5), mods (experimental); FSR edition: anti-aliasing (FSR 3.1 / FSR 4.1.2 / DLSS), scaling, sharpness
    - **PATCHES**: community game patches (frame-rate patch type, no barriers, no reset, no motion blur/DOF, photo mode)
    - **CONTROLS**: keyboard and controller bindings
    - **GARAGE**: save profiles, backups with restore, shader cache, desktop shortcut, Add to Steam

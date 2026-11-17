@@ -22,7 +22,7 @@ from dcport.ini import read_ini, update_ini
 from dcport.paths import AppPaths
 from dcport.prepare_state import is_prepared, prepare_command
 from dcport.process import RUNNER
-from dcport.runtime import game_command, game_env, session_upscale
+from dcport.runtime import game_command, game_env, session_mods, session_upscale
 from dcport.settings import load_settings, save_settings
 from dcport.ui import theme
 from dcport.ui.controls import ControlsPage
@@ -748,7 +748,7 @@ class App(tk.Tk):
                                           session_upscale(self.paths, s, self.fsr))
         if error:
             self.pages["race"].show_message(error)
-        cmd = game_command(self.paths, gd, s.fps)
+        cmd = game_command(self.paths, gd, s.fps, mods=session_mods(self.paths, s))
         env = game_env(self.paths, s, self.fsr, dict(os.environ))
         self._set_phase("running")
         self._start("game", cmd, env, self.paths.log)

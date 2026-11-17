@@ -96,6 +96,126 @@ index 0fcf416..78758a4 100644
      return ORBIS_OK;
  }
  
+diff --git a/gpu/shadps4/core/libraries/avplayer/avplayer_source.cpp b/gpu/shadps4/core/libraries/avplayer/avplayer_source.cpp
+index a72a41c..058bccb 100644
+--- a/gpu/shadps4/core/libraries/avplayer/avplayer_source.cpp
++++ b/gpu/shadps4/core/libraries/avplayer/avplayer_source.cpp
+@@ -10,6 +10,8 @@
+ #include "core/libraries/videodec/video_utils.h"
+ #include "core/memory.h"
+ 
++#include <cstdio>
++
+ #include <magic_enum/magic_enum.hpp>
+ 
+ extern "C" {
+@@ -24,6 +26,16 @@ extern "C" {
+ #include "common/support/avdec.h"
+ 
+ extern "C" int runtime_file_translate(const char* guest, char* out, size_t size);
++extern "C" unsigned long long bbgpu_flips; // flips the GPU thread has made (videoout driver)
++
++namespace {
++// DCport (#15): flips a video frame stays out of the decoder's reach after the game took the
++// next one. The game draws the frame it got as a texture; our GPU thread runs those draws up to
++// a few frames after the game asked for the next video frame. The buffer used to go back to the
++// decoder at once, which could write a later picture into it before that draw read it: at 60 and
++// 75 FPS the intro showed single frames out of order (a shot from before a cut, after it).
++constexpr unsigned long long VIDEO_BUFFER_HOLD_FLIPS = 3;
++} // namespace
+ 
+ namespace Libraries::AvPlayer {
+ 
+@@ -265,6 +277,8 @@ bool AvPlayerSource::Start() {
+         for (u64 index = 0; index < m_max_num_video_framebuffers; ++index) {
+             m_video_buffers.Push(GuestBuffer(m_memory_replacement, 0x100, size, true));
+         }
++        std::printf("AvPlayer: video %dx%d, %u frame buffers\n", m_video_codec_context->width,
++                    m_video_codec_context->height, m_max_num_video_framebuffers);
+     }
+     if (m_audio_stream_index) {
+         const auto stream_index = m_streams[m_audio_stream_index.value()].ffmpeg_index;
+@@ -319,6 +333,10 @@ bool AvPlayerSource::Stop() {
+ 
+     m_current_audio_frame.reset();
+     m_current_video_frame.reset();
++    {
++        std::scoped_lock lock{m_retired_video_mutex};
++        m_retired_video_buffers.clear();
++    }
+ 
+     m_video_buffers.Clear();
+     m_audio_buffers.Clear();
+@@ -364,6 +382,7 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfo& video_info) {
+ }
+ 
+ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
++    RecycleVideoBuffers();
+     if (!IsActive() || m_is_paused) {
+         return false;
+     }
+@@ -381,9 +400,11 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
+     }
+ 
+     if (m_current_video_frame.has_value()) {
+-        m_video_buffers.Push(std::move(m_current_video_frame->buffer));
++        std::scoped_lock lock{m_retired_video_mutex};
++        m_retired_video_buffers.emplace_back(
++            __atomic_load_n(&bbgpu_flips, __ATOMIC_RELAXED) + VIDEO_BUFFER_HOLD_FLIPS,
++            std::move(m_current_video_frame->buffer));
+         m_current_video_frame.reset();
+-        m_video_buffers_cv.Notify();
+     }
+ 
+     auto frame = m_video_frames.Pop();
+@@ -396,6 +417,22 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
+     return true;
+ }
+ 
++void AvPlayerSource::RecycleVideoBuffers() {
++    const unsigned long long flips = __atomic_load_n(&bbgpu_flips, __ATOMIC_RELAXED);
++    bool recycled = false;
++    {
++        std::scoped_lock lock{m_retired_video_mutex};
++        while (!m_retired_video_buffers.empty() && m_retired_video_buffers.front().first <= flips) {
++            m_video_buffers.Push(std::move(m_retired_video_buffers.front().second));
++            m_retired_video_buffers.pop_front();
++            recycled = true;
++        }
++    }
++    if (recycled) {
++        m_video_buffers_cv.Notify();
++    }
++}
++
+ bool AvPlayerSource::GetAudioData(AvPlayerFrameInfo& audio_info) {
+     if (!IsActive() || m_is_paused) {
+         return false;
+diff --git a/gpu/shadps4/core/libraries/avplayer/avplayer_source.h b/gpu/shadps4/core/libraries/avplayer/avplayer_source.h
+index a835a14..835e6a8 100644
+--- a/gpu/shadps4/core/libraries/avplayer/avplayer_source.h
++++ b/gpu/shadps4/core/libraries/avplayer/avplayer_source.h
+@@ -6,6 +6,7 @@
+ #include <atomic>
+ #include <chrono>
+ #include <condition_variable>
++#include <deque>
+ #include <memory>
+ #include <mutex>
+ #include <optional>
+@@ -228,6 +229,12 @@ private:
+     std::optional<Frame> m_current_video_frame;
+     std::optional<Frame> m_current_audio_frame;
+ 
++    // DCport: video frames the game has moved past, each with the flip count from which the
++    // decoder may write into it again (see GetVideoData).
++    void RecycleVideoBuffers();
++    std::mutex m_retired_video_mutex;
++    std::deque<std::pair<u64, GuestBuffer>> m_retired_video_buffers;
++
+     std::optional<s32> m_video_stream_index{};
+     std::optional<s32> m_audio_stream_index{};
+ 
 diff --git a/gpu/shadps4/core/libraries/gnmdriver/gnmdriver.cpp b/gpu/shadps4/core/libraries/gnmdriver/gnmdriver.cpp
 index 5e27f22..8c8df8f 100644
 --- a/gpu/shadps4/core/libraries/gnmdriver/gnmdriver.cpp
@@ -2092,7 +2212,7 @@ index 1211eb6..8773fa4 100644
          ++wait_cursor;
      }
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-index 53525a9..564e66b 100644
+index 53525a9..0f4622b 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 @@ -4,13 +4,21 @@
@@ -2898,6 +3018,37 @@ index 53525a9..564e66b 100644
      auto* bind = BindsForArena(new_arena);
      resident_ranges.ForEachInRange(base_block, end_block, [&](const Backing& backing) {
          const u64 start = std::max(base_block, backing.start);
+@@ -608,6 +1298,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
+         return;
+     }
+     BbStats::Timer timer{BbStats::t_resident};
++    Vulkan::Breadcrumbs::StepScope step{Vulkan::Breadcrumbs::Step::AllocateMemory};
+ 
+     const vk::MemoryAllocateFlagsInfo alloc_flags = {
+         .flags = vk::MemoryAllocateFlagBits::eDeviceAddress,
+@@ -914,7 +1605,21 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
+     };
+ 
+     info.AddWait(signal_sema, signal_tick);
+-    auto submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
++    u32 bind_count = 0;
++    u64 bind_bytes = 0;
++    for (const auto& binds : pending_binds) {
++        bind_count += static_cast<u32>(binds.binds.size());
++        for (const auto& bind : binds.binds) {
++            bind_bytes += bind.size;
++        }
++    }
++    Vulkan::Breadcrumbs::NoteSparseBind(instance.GetDevice(), signal_sema, signal_tick, bind_count,
++                                        bind_bytes);
++    vk::Result submit_result;
++    {
++        Vulkan::Breadcrumbs::StepScope step{Vulkan::Breadcrumbs::Step::SparseBind};
++        submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
++    }
+     if (submit_result == vk::Result::eErrorDeviceLost) {
+         instance.ReportDeviceLost("sparse binding");
+     }
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h b/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
 index 252b2a0..ef31eaf 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
@@ -4666,10 +4817,10 @@ index 4dd46cf..b61fb7f 100644
      auto [width, height] = cur_size;
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.cpp
 new file mode 100644
-index 0000000..1222d1e
+index 0000000..b0d77fe
 --- /dev/null
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.cpp
-@@ -0,0 +1,479 @@
+@@ -0,0 +1,593 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 +
@@ -5104,12 +5255,43 @@ index 0000000..1222d1e
 +    }
 +}
 +
-+void Report() {
-+    if (reported.exchange(true)) {
++namespace {
++
++const char* StepName(Step step) {
++    switch (step) {
++    case Step::Submit: return "queue submit";
++    case Step::SparseBind: return "sparse bind (buffer cache arena)";
++    case Step::Present: return "present to the screen";
++    case Step::Acquire: return "acquire a screen image";
++    case Step::AllocateMemory: return "video memory allocation (buffer cache arena)";
++    case Step::WaitGpu: return "waiting for the GPU";
++    case Step::HostCopies: return "waiting for game memory copies";
++    default: return "other";
++    }
++}
++
++const auto host_start = std::chrono::steady_clock::now();
++u32 HostMs() {
++    // +1: 0 means "not in this step".
++    return u32(std::chrono::duration_cast<std::chrono::milliseconds>(
++                   std::chrono::steady_clock::now() - host_start)
++                   .count()) +
++           1;
++}
++std::array<std::atomic<u32>, size_t(Step::Count)> step_depth{};
++std::array<std::atomic<u32>, size_t(Step::Count)> step_since{};
++
++std::atomic<VkDevice> sparse_device{VK_NULL_HANDLE};
++std::atomic<VkSemaphore> sparse_semaphore{VK_NULL_HANDLE};
++std::atomic<u64> sparse_tick{0}, sparse_batches{0}, sparse_binds{0}, sparse_bytes{0};
++std::atomic<u32> sparse_last_ms{0};
++
++void PrintMarkers(const char* title) {
++    if (!slots) {
 +        return;
 +    }
-+    if (slots) {
-+        std::printf("GPU markers at the device loss (started / finished / recorded):\n");
++    {
++        std::printf("%s (started / finished / recorded):\n", title);
 +        if (const u32 recorded = work_number.load()) {
 +            const u32 started = slots[Work * 2], finished = slots[Work * 2 + 1];
 +            std::printf("  game draws/dispatches: last started #%u, last finished #%u, recorded "
@@ -5134,7 +5316,85 @@ index 0000000..1222d1e
 +                        recorded, started != finished ? "  <- running on the GPU" : "");
 +        }
 +    }
++}
++
++void PrintHost() {
++    const u32 now = HostMs();
++    bool any = false;
++    for (size_t i = 0; i < step_since.size(); ++i) {
++        const u32 since = step_since[i].load(std::memory_order_relaxed);
++        if (step_depth[i].load(std::memory_order_relaxed) == 0 || since == 0) {
++            continue;
++        }
++        std::printf("GPU host step in progress: %s for %u ms\n", StepName(Step(i)),
++                    now > since ? now - since : 0);
++        any = true;
++    }
++    if (!any) {
++        std::printf("GPU host steps: none in progress\n");
++    }
++    const u64 tick = sparse_tick.load();
++    if (tick == 0) {
++        std::printf("Sparse binds: none submitted\n");
++        return;
++    }
++    u64 done = 0;
++    const VkDevice device = sparse_device.load();
++    const VkSemaphore semaphore = sparse_semaphore.load();
++    const auto get_value = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetSemaphoreCounterValue;
++    const bool known =
++        get_value && device && semaphore && get_value(device, semaphore, &done) == VK_SUCCESS;
++    const u32 last = sparse_last_ms.load();
++    std::printf("Sparse binds: %llu batches (%llu binds, %llu MiB); last #%llu %u ms ago, ",
++                (unsigned long long)sparse_batches.load(), (unsigned long long)sparse_binds.load(),
++                (unsigned long long)(sparse_bytes.load() >> 20), (unsigned long long)tick,
++                now > last ? now - last : 0);
++    if (!known) {
++        std::printf("progress unknown\n");
++    } else if (done >= tick) {
++        std::printf("all done on the GPU\n");
++    } else {
++        std::printf("GPU has done #%llu: %llu still pending  <- the GPU waits for them\n",
++                    (unsigned long long)done, (unsigned long long)(tick - done));
++    }
++}
++
++} // namespace
++
++StepScope::StepScope(Step step_) : step{step_} {
++    const size_t i = size_t(step);
++    if (step_depth[i].fetch_add(1, std::memory_order_relaxed) == 0) {
++        step_since[i].store(HostMs(), std::memory_order_relaxed);
++    }
++}
++
++StepScope::~StepScope() {
++    step_depth[size_t(step)].fetch_sub(1, std::memory_order_relaxed);
++}
++
++void NoteSparseBind(vk::Device device, vk::Semaphore semaphore, u64 tick, u32 binds, u64 bytes) {
++    sparse_device.store(static_cast<VkDevice>(device));
++    sparse_semaphore.store(static_cast<VkSemaphore>(semaphore));
++    sparse_batches.fetch_add(1, std::memory_order_relaxed);
++    sparse_binds.fetch_add(binds, std::memory_order_relaxed);
++    sparse_bytes.fetch_add(bytes, std::memory_order_relaxed);
++    sparse_last_ms.store(HostMs(), std::memory_order_relaxed);
++    sparse_tick.store(tick, std::memory_order_release);
++}
++
++void Report() {
++    if (reported.exchange(true)) {
++        return;
++    }
++    PrintMarkers("GPU markers at the device loss");
++    PrintHost();
 +    ReportFault();
++    std::fflush(stdout);
++}
++
++void ReportProgress(const char* title) {
++    PrintMarkers(title);
++    PrintHost();
 +    std::fflush(stdout);
 +}
 +
@@ -5149,12 +5409,17 @@ index 0000000..1222d1e
 +}
 +
 +} // namespace Vulkan::Breadcrumbs
++
++// DCport (#17): the freeze monitor (probe.c) asks what the GPU side is doing during a freeze.
++extern "C" void bbgpu_freeze_progress(void) {
++    Vulkan::Breadcrumbs::ReportProgress("GPU during the freeze");
++}
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.h b/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.h
 new file mode 100644
-index 0000000..04426ed
+index 0000000..369301d
 --- /dev/null
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.h
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,82 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#pragma once
 +
@@ -5196,6 +5461,36 @@ index 0000000..04426ed
 +void WorkEnd(vk::CommandBuffer cmdbuf, u32 number);
 +/// Prints where the GPU was (once); call before reporting a device loss.
 +void Report();
++
++/// DCport (#17): host steps that can wait on the GPU, the driver or the OS. A report names the
++/// ones in progress and for how long: a submission that never started is either the GPU waiting
++/// (sparse bind, swapchain image) or the host stuck in one of these.
++enum class Step : u32 {
++    Submit,
++    SparseBind,
++    Present,
++    Acquire,
++    AllocateMemory,
++    WaitGpu,
++    HostCopies,
++    Count
++};
++class StepScope {
++public:
++    explicit StepScope(Step step);
++    ~StepScope();
++    StepScope(const StepScope&) = delete;
++    StepScope& operator=(const StepScope&) = delete;
++
++private:
++    Step step;
++};
++/// DCport (#17): a sparse bind batch (buffer cache arenas) and the timeline value it signals;
++/// reports compare it with the semaphore's value (still pending on the GPU queue, or done).
++void NoteSparseBind(vk::Device device, vk::Semaphore semaphore, u64 tick, u32 binds, u64 bytes);
++/// DCport (#17): markers, steps in progress and sparse bind progress, any number of times (freeze
++/// reports, which can recover). Only reads; safe from any thread.
++void ReportProgress(const char* title);
 +/// DCport: names a GPU address range in fault reports (ranges the driver's address log does not
 +/// report, such as the buffer cache's sparse arenas).
 +void NoteRange(u64 gpu_address, u64 size, std::string label);
@@ -16493,7 +16788,7 @@ index e2392c5..f49a38e 100644
  
      void CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst);
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
-index 135f51a..f8fbb37 100644
+index 135f51a..6c15f74 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.cpp
 @@ -20,6 +20,7 @@
@@ -16513,7 +16808,15 @@ index 135f51a..f8fbb37 100644
      AllocateWorkerCommandBuffers();
      priority_pending_ops_thread =
          std::jthread(std::bind_front(&Scheduler::PriorityPendingOpsThread, this));
-@@ -383,6 +386,7 @@ void Scheduler::AllocateWorkerCommandBuffers() {
+@@ -349,6 +352,7 @@ void Scheduler::Wait(u64 tick) {
+         Flush(info);
+     }
+     BbStats::WaitTimer timer{BbStats::tick_wait_ns};
++    Breadcrumbs::StepScope step{Breadcrumbs::Step::WaitGpu};
+     work_semaphore.Wait(tick);
+ }
+ 
+@@ -383,6 +387,7 @@ void Scheduler::AllocateWorkerCommandBuffers() {
  
      current_cmdbuf = command_pool.Commit();
      Check(current_cmdbuf.begin(begin_info));
@@ -16521,10 +16824,15 @@ index 135f51a..f8fbb37 100644
  
      // Invalidate dynamic state so it gets applied to the new command buffer.
      dynamic_state.Invalidate();
-@@ -421,6 +425,20 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
+@@ -420,7 +425,24 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
+     }
      SyncRecording();
      // Guest memory copies into staging read by this submission (copy threads).
-     WaitHostCopies();
+-    WaitHostCopies();
++    {
++        Breadcrumbs::StepScope step{Breadcrumbs::Step::HostCopies};
++        WaitHostCopies();
++    }
 +    // The CPU reads GPU results (readbacks, auto-exposure data) once this submission's fence
 +    // or semaphore signals. Vulkan only makes device writes visible to the host through a
 +    // barrier into the host stage, so every batch ends with one.
@@ -16542,6 +16850,19 @@ index 135f51a..f8fbb37 100644
      Check(current_cmdbuf.end());
      // bbport: one command buffer per submission (upstream's sessions add an upload buffer that
      // nothing records into since batching was removed upstream)
+@@ -452,7 +474,11 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
+     };
+ 
+     ImGui::Core::TextureManager::Submit();
+-    auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
++    vk::Result submit_result;
++    {
++        Breadcrumbs::StepScope step{Breadcrumbs::Step::Submit};
++        submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
++    }
+     if (submit_result == vk::Result::eErrorDeviceLost) {
+         instance.ReportDeviceLost("submit");
+     }
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h b/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h
 index 4044772..7383f31 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_scheduler.h
@@ -16620,7 +16941,7 @@ index 8519c07..843cae1 100644
      Scheduler& scheduler;
  
 diff --git a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
-index 0a2fea3..42369e6 100644
+index 0a2fea3..6307195 100644
 --- a/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
 +++ b/gpu/shadps4/video_core/renderer_vulkan/vk_swapchain.cpp
 @@ -9,6 +9,7 @@
@@ -16631,7 +16952,24 @@ index 0a2fea3..42369e6 100644
  #include "video_core/renderer_vulkan/vk_instance.h"
  #include "video_core/renderer_vulkan/vk_swapchain.h"
  
-@@ -119,6 +120,10 @@ bool Swapchain::AcquireNextImage() {
+@@ -105,9 +106,13 @@ void Swapchain::SetHDR(bool hdr) {
+ 
+ bool Swapchain::AcquireNextImage() {
+     vk::Device device = instance.GetDevice();
+-    vk::Result result =
+-        device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
+-                                   image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
++    vk::Result result;
++    {
++        Breadcrumbs::StepScope step{Breadcrumbs::Step::Acquire};
++        result = device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
++                                            image_acquired[frame_index], VK_NULL_HANDLE,
++                                            &image_index);
++    }
+ 
+     switch (result) {
+     case vk::Result::eSuccess:
+@@ -119,6 +124,10 @@ bool Swapchain::AcquireNextImage() {
          needs_recreation = true;
          break;
      default:
@@ -16642,7 +16980,16 @@ index 0a2fea3..42369e6 100644
          LOG_CRITICAL(Render_Vulkan, "Swapchain acquire returned unknown result {}",
                       vk::to_string(result));
          UNREACHABLE();
-@@ -141,11 +146,15 @@ bool Swapchain::Present() {
+@@ -137,15 +146,23 @@ bool Swapchain::Present() {
+         .pImageIndices = &image_index,
+     };
+ 
+-    auto result = instance.GetPresentQueue().presentKHR(present_info);
++    vk::Result result;
++    {
++        Breadcrumbs::StepScope step{Breadcrumbs::Step::Present};
++        result = instance.GetPresentQueue().presentKHR(present_info);
++    }
      if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
          needs_recreation = true;
      } else {
@@ -16659,7 +17006,7 @@ index 0a2fea3..42369e6 100644
  
      return !needs_recreation;
  }
-@@ -286,7 +295,11 @@ void Swapchain::Destroy() {
+@@ -286,7 +303,11 @@ void Swapchain::Destroy() {
  
  void Swapchain::RefreshSemaphores() {
      const vk::Device device = instance.GetDevice();
@@ -20919,7 +21266,7 @@ index 0000000..024c6a6
 +{"zr094EQ39Ww","__cxa_pure_virtual"},
 +{"zwY0YV91TTI","sceGnmSubmitCommandBuffers"},
 diff --git a/src/probe.c b/src/probe.c
-index 988d694..3237f96 100644
+index 988d694..45a16e7 100644
 --- a/src/probe.c
 +++ b/src/probe.c
 @@ -13,6 +13,8 @@
@@ -20962,7 +21309,7 @@ index 988d694..3237f96 100644
  #endif
      exit(24);
  }
-@@ -163,6 +177,98 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
+@@ -163,6 +177,100 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
      }
      snprintf(out,size,"%p",(void *)address);
  }
@@ -20971,6 +21318,7 @@ index 988d694..3237f96 100644
 + * game code are printed with their call chain: what the game waits for. Once per freeze, at
 + * most eight; BB_FREEZE_REPORT=0 turns it off. */
 +extern unsigned long long bbgpu_flips;
++extern void bbgpu_freeze_progress(void); /* vk_breadcrumbs.cpp: GPU side of a freeze (#17) */
 +enum { FREEZE_FRAMES = 12, FREEZE_SCAN = 96 };
 +static int guest_code(uintptr_t a) { return image && a-(uintptr_t)image<0x20000000; }
 +static void freeze_report(unsigned long stalled_ms) {
@@ -21047,6 +21395,7 @@ index 988d694..3237f96 100644
 +        /* Past the boot (its loading screens flip rarely), once per freeze. */
 +        if (!reported && flips>2000 && now-since>=1500) {
 +            freeze_report((unsigned long)(now-since));
++            bbgpu_freeze_progress();
 +            reported=1;
 +            if (++reports>=8) return 0;
 +        }
@@ -21061,7 +21410,7 @@ index 988d694..3237f96 100644
  static int fatal_reported;
  static LONG fatal_exception(EXCEPTION_POINTERS *info) {
      if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
-@@ -178,7 +284,61 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
+@@ -178,7 +286,61 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
          fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu)\n",record->ExceptionCode,where,GetCurrentThreadId());
      fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
              c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
@@ -21123,7 +21472,7 @@ index 988d694..3237f96 100644
      /* Return addresses near the top of the stack: system libraries (the C runtime's memcpy)
       * keep no frame pointers, so the rbp chain below can skip their caller. */
      for (int slot=0, shown=0; slot<64 && shown<6; ++slot) {
-@@ -248,6 +408,41 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
+@@ -248,6 +410,41 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
      return EXCEPTION_CONTINUE_SEARCH;
  }
  static LONG WINAPI unhandled_fault(EXCEPTION_POINTERS *info) { return fatal_exception(info); }
@@ -21165,7 +21514,7 @@ index 988d694..3237f96 100644
  /* Guest code reads its TCB with `mov rax, gs:[0]` (link_*.py rewrote fs:[0]); on Windows
   * the displacement becomes the TEB TLS slot that holds the guest TCB (runtime_thread.c). */
  uint32_t runtime_thread_tcb_offset(void);
-@@ -419,6 +614,78 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
+@@ -419,6 +616,78 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
      fclose(f);
      printf("Patches: %" PRIu64 " writes, %" PRIu64 " bytes applied, %" PRIu64 " pointers rebased\n",count,bytes,rebased);
  }
@@ -21244,7 +21593,23 @@ index 988d694..3237f96 100644
  /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
   * applied at start). Descriptors are closed first so the old GPU device and its memory are
   * released before the new process opens its own. */
-@@ -513,6 +780,11 @@ int main(int argc, char **argv) {
+@@ -474,13 +743,14 @@ int main(int argc, char **argv) {
+         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
+         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
+         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
++        else if (!strcmp(argv[i], "--app0-mod") && i+1<argc) runtime_file_add_mod(argv[++i]);
+         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
+         else if (!strcmp(argv[i], "--patches") && i+1<argc) patch_file=argv[++i];
+         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
+         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
+     }
+     if (argc < 2) {
+-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--timeout seconds] | --vulkan-only\n", argv[0]);
++        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--content-profile file] [--app0 dir [--app0-mod dir]...] [--user dir] [--patches file] [--timeout seconds] | --vulkan-only\n", argv[0]);
+         return 1;
+     }
+     if (content_profile) {
+@@ -513,6 +783,11 @@ int main(int argc, char **argv) {
      SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
      AddVectoredExceptionHandler(1, vectored_fault);
      SetUnhandledExceptionFilter(unhandled_fault);
@@ -21256,7 +21621,7 @@ index 988d694..3237f96 100644
      if (getenv("BB_STRICT_HANDLES")) {
          PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY strict={0};
          strict.RaiseExceptionOnInvalidHandleReference=1;
-@@ -521,6 +793,7 @@ int main(int argc, char **argv) {
+@@ -521,6 +796,7 @@ int main(int argc, char **argv) {
              fprintf(stderr,"BB_STRICT_HANDLES: policy not set (%lu)\n",GetLastError());
      }
      (void)timeout_seconds; /* no watchdog on Windows */
@@ -21264,7 +21629,7 @@ index 988d694..3237f96 100644
  #else
      page_size = (size_t)sysconf(_SC_PAGESIZE);
      struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
-@@ -636,7 +909,7 @@ int main(int argc, char **argv) {
+@@ -636,7 +912,7 @@ int main(int argc, char **argv) {
      if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
      fclose(f);
      if (!cpu_only) {
@@ -21273,7 +21638,7 @@ index 988d694..3237f96 100644
          uint32_t attributes=0;
          snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
          sfo_value(sfo,"TITLE",title,sizeof(title),NULL);
-@@ -644,7 +917,13 @@ int main(int argc, char **argv) {
+@@ -644,7 +920,13 @@ int main(int argc, char **argv) {
          sfo_value(sfo,"ATTRIBUTE",NULL,0,&attributes);
          uint64_t sdk=0;
          if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
@@ -21288,7 +21653,7 @@ index 988d694..3237f96 100644
          gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
          if (bbgpu_init(&gpu)) fail("GPU initialization failed");
          printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,bbgpu_symbol_count());
-@@ -680,9 +959,11 @@ int main(int argc, char **argv) {
+@@ -680,9 +962,11 @@ int main(int argc, char **argv) {
      /* The Hunter's Dream backend reads the game's code before the patches change it. */
      bbnet_set_image(image, size);
      if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
@@ -21300,7 +21665,7 @@ index 988d694..3237f96 100644
      protect(traps, round_page((import_count + 1) * 32), 5);
      protect(image, round_page(size), 0);
      int executable_entry = 0;
-@@ -717,7 +998,20 @@ int main(int argc, char **argv) {
+@@ -717,7 +1001,20 @@ int main(int argc, char **argv) {
      bbnet_initialize(); /* the online session starts with the game */
      printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
      entered_game=1;
@@ -21450,7 +21815,7 @@ index 25865ae..bab1de3 100644
  /* Same symbol name means same contract whether imported from libkernel or
   * libScePosix, so newer modules resolve by name through runtime_symbol. */
 diff --git a/src/runtime.h b/src/runtime.h
-index 773ee79..bdcfcfe 100644
+index 773ee79..63032f7 100644
 --- a/src/runtime.h
 +++ b/src/runtime.h
 @@ -2,6 +2,7 @@
@@ -21470,7 +21835,16 @@ index 773ee79..bdcfcfe 100644
  #define ABI __attribute__((sysv_abi))
  typedef void (ABI *GuestCallback)(void);
  void runtime_start(uint64_t capabilities);
-@@ -82,11 +85,31 @@ void runtime_ajm_report(void);
+@@ -59,6 +62,8 @@ uintptr_t runtime_file_resolve(const char *name);
+ uintptr_t runtime_services_resolve(const char *name);
+ void runtime_file_report(void);
+ void runtime_file_configure(const char *app0, const char *user);
++/* --app0-mod: a folder whose files replace the game's (first given wins). */
++void runtime_file_add_mod(const char *dir);
+ int runtime_file_mount(const char *guest, const char *host);
+ void runtime_file_unmount(const char *guest);
+ int runtime_file_translate(const char *guest, char *out, size_t size);
+@@ -82,11 +87,31 @@ void runtime_ajm_report(void);
  uintptr_t runtime_audio_resolve(const char *name);
  void runtime_audio_report(void);
  uintptr_t runtime_pad_resolve(const char *name);
@@ -22336,17 +22710,49 @@ index 0000000..600906b
 +    seal_trampolines();
 +}
 diff --git a/src/runtime_file.c b/src/runtime_file.c
-index c64c0f9..4bff266 100644
+index c64c0f9..b0a477e 100644
 --- a/src/runtime_file.c
 +++ b/src/runtime_file.c
-@@ -105,11 +105,13 @@ void runtime_file_unmount(const char *guest) {
+@@ -1,5 +1,7 @@
+ /* Guest file system: PS4 mount points mapped onto host directories.
+- *   /app0, /hostapp  -> game package root (read-only by convention)
++ *   /app0, /hostapp  -> game package root (read-only by convention); mod folders (--app0-mod,
++ *                       first wins) lie over it: the first that has a file gives it, and
++ *                       directories list the game's and every mod's entries
+  *   /temp0, /download0, /data, and mounts added by SaveData -> user directory
+  * Guest descriptors are small integers in our own table; stdio 0-2 pass through.
+  * Paths containing ".." components are rejected rather than normalized. */
+@@ -105,11 +107,36 @@ void runtime_file_unmount(const char *guest) {
      }
      pthread_mutex_unlock(&lock);
  }
 -static char user_root[512]="user";
 +static char user_root[512]="user", app_root[512]="";
++/* Mod folders over the game's (--app0-mod), first wins. */
++enum { MAX_MODS=32 };
++static char mods[MAX_MODS][512];
++static int mod_count;
  const char *runtime_file_user_dir(void) { return user_root; }
 +const char *runtime_file_app_dir(void) { return app_root; }
++void runtime_file_add_mod(const char *dir) {
++    if (!dir || !*dir) return;
++    if (mod_count==MAX_MODS) { printf("Mods: too many folders, %s left out\n",dir); return; }
++    char *root=mods[mod_count];
++    snprintf(root,sizeof(mods[0]),"%s",dir);
++    for (size_t n=strlen(root); n>1 && (root[n-1]=='/' || root[n-1]=='\\');) root[--n]=0;
++    ++mod_count;
++    printf("Mods: %s (its files replace the game's)\n",root);
++}
++/* Folder i of the game's: the mods, then the game itself (i==mod_count). */
++static const char *game_root(int i) { return i<mod_count ? mods[i] : app_root; }
++/* The part of a host path under the game or a mod folder, or NULL when it is in none. */
++static const char *game_relative(const char *path) {
++    for (int i=0;i<=mod_count;++i) {
++        size_t n=strlen(game_root(i));
++        if (n && !strncmp(path,game_root(i),n) && (path[n]=='/' || path[n]=='\\' || !path[n])) return path+n;
++    }
++    return NULL;
++}
  void runtime_file_configure(const char *app0,const char *user) {
      char path[600];
      snprintf(user_root,sizeof(user_root),"%s",user);
@@ -22354,9 +22760,30 @@ index c64c0f9..4bff266 100644
      runtime_file_mount("/app0",app0);
      runtime_file_mount("/hostapp",app0);
      const char *writable[]={"temp0","download0","data"};
-@@ -140,7 +142,8 @@ static int translate(const char *guest,char *out,size_t size) {
+@@ -135,12 +162,28 @@ static int translate(const char *guest,char *out,size_t size) {
+         size_t n=strlen(mounts[i].guest);
+         if (!strncmp(buffer,mounts[i].guest,n) && (buffer[n]=='/' || !buffer[n]) && n>best) { best=n; m=&mounts[i]; }
+     }
+-    int result=0;
++    int result=0, app=m && mod_count && (!strcmp(m->guest,"/app0") || !strcmp(m->guest,"/hostapp"));
+     if (!m) result=ENOENT;
      else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
      pthread_mutex_unlock(&lock);
++    if (!result && app) {
++        /* The first mod that has the file gives it. A directory the game has stays the game's
++         * (its listing merges the mods' entries). */
++        const char *relative=game_relative(out);
++        char modded[1024]; HostStat file;
++        if (relative && !host_stat(out,&file) && S_ISDIR(file.st_mode)) relative=NULL;
++        for (int i=0;relative && i<mod_count;++i) {
++            if ((size_t)snprintf(modded,sizeof(modded),"%s%s",mods[i],relative)>=sizeof(modded) ||
++                host_stat(modded,&file)) continue;
++            static int reported;
++            if (__atomic_fetch_add(&reported,1,__ATOMIC_RELAXED)<200) printf("Mods: %s -> %s\n",buffer,modded);
++            if ((size_t)snprintf(out,size,"%s",modded)>=size) result=ENAMETOOLONG;
++            break;
++        }
++    }
      if (!result && strstr(out,"/dvdroot_ps4/")) {
 -        const char *language=getenv("BB_LANGUAGE");
 +        const char *language=getenv("DC_LANGUAGE");
@@ -22364,7 +22791,50 @@ index c64c0f9..4bff266 100644
          if (language && !strcmp(language,"17")) {
              /* Some game paths use the Portuguese or English fallback directory. */
              const char *folders[]={"/msg/porpt/","/menu/porpt/","/msg/engus/","/menu/engus/"};
-@@ -267,6 +270,13 @@ static int game_path(const char *p) {
+@@ -233,6 +276,42 @@ static Listing *list_directory(const char *path) {
+     closedir(d);
+     return l;
+ }
++/* A game directory with mods lists the entries of the game's and every mod's (each name once). */
++static void merge_listing(Listing *l,const Listing *extra) {
++    size_t bytes=l->count ? l->offsets[l->count-1]+strlen(l->names+l->offsets[l->count-1])+1 : 0;
++    for (size_t i=0;i<extra->count;++i) {
++        const char *name=extra->names+extra->offsets[i];
++        int seen=0;
++        for (size_t j=0;j<l->count && !seen;++j) seen=!strcmp(l->names+l->offsets[j],name);
++        if (seen) continue;
++        size_t n=strlen(name)+1;
++        char *names=realloc(l->names,bytes+n);
++        size_t *offsets=realloc(l->offsets,(l->count+1)*sizeof(size_t));
++        unsigned char *types=realloc(l->types,l->count+1);
++        if (names) l->names=names;
++        if (offsets) l->offsets=offsets;
++        if (types) l->types=types;
++        if (!names || !offsets || !types) { fputs("Out of memory listing directory\n",stderr); exit(1); }
++        memcpy(l->names+bytes,name,n);
++        l->offsets[l->count]=bytes; l->types[l->count]=extra->types[i];
++        ++l->count; bytes+=n;
++    }
++}
++static int game_path(const char *p);
++static Listing *list_game_directory(const char *guest,const char *path) {
++    Listing *l=list_directory(path);
++    const char *relative=l && mod_count && game_path(guest) ? game_relative(path) : NULL;
++    char other[1024];
++    for (int i=0;relative && i<=mod_count;++i) {
++        if ((size_t)snprintf(other,sizeof(other),"%s%s",game_root(i),relative)>=sizeof(other) ||
++            !strcmp(other,path)) continue;
++        Listing *extra=list_directory(other);
++        if (!extra) continue;
++        merge_listing(l,extra);
++        free_listing(extra);
++    }
++    return l;
++}
+ static void convert_stat(const HostStat *s,GuestStat *g) {
+     memset(g,0,sizeof(*g));
+     g->dev=(uint32_t)s->st_dev; g->ino=(uint32_t)s->st_ino;
+@@ -267,6 +346,13 @@ static int game_path(const char *p) {
      return (!strncmp(p,"/app0",5) && (!p[5] || p[5]=='/')) ||
             (!strncmp(p,"/hostapp",8) && (!p[8] || p[8]=='/'));
  }
@@ -22378,8 +22848,12 @@ index c64c0f9..4bff266 100644
  /* BB_SAVE_TRACE=1: every operation on save files (/savedataN). */
  static int save_trace(void) { static int v=-1; if (v<0) { const char *e=getenv("BB_SAVE_TRACE"); v=e && e[0]=='1'; } return v; }
  /* Saves (/savedataN): see File. The copy starts as the old file unless the open truncates. */
-@@ -383,7 +393,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
-         if (!(dir=list_directory(path))) return -EACCES;
+@@ -380,10 +466,10 @@ static int64_t do_open(const char *guest,int flags,int mode) {
+     int host=-1;
+     if (!host_stat(path,&s) && S_ISDIR(s.st_mode)) {
+         if (flags&3) return -EISDIR;
+-        if (!(dir=list_directory(path))) return -EACCES;
++        if (!(dir=list_game_directory(guest,path))) return -EACCES;
      } else if (flags&0x20000) {
          e=errno==ENOENT ? ENOENT : ENOTDIR;
 -        if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
@@ -22387,7 +22861,7 @@ index c64c0f9..4bff266 100644
          return -e;
      } else {
          if (save_path(guest) && (flags&3)) {
-@@ -400,7 +410,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
+@@ -400,7 +486,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
              printf("Save trace: open(%s, flags 0x%x) -> host %d%s%s\n",guest,flags,host,temp ? ", copy " : "",temp ? temp : "");
          if (host<0) {
              e=errno;
@@ -22396,7 +22870,7 @@ index c64c0f9..4bff266 100644
              return -e;
          }
          if (host_fstat(host,&s)) memset(&s,0,sizeof(s));
-@@ -421,7 +431,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
+@@ -421,12 +507,12 @@ static int64_t do_open(const char *guest,int flags,int mode) {
          printf("Save trace: open(%s, flags 0x%x) -> host %d%s%s\n",guest,flags,host,temp ? ", copy " : "",temp ? temp : "");
      if (host<0) {
          e=errno;
@@ -22405,6 +22879,12 @@ index c64c0f9..4bff266 100644
          return -e;
      }
      struct stat s;
+     Listing *dir=NULL;
+-    if (!fstat(host,&s) && S_ISDIR(s.st_mode)) dir=list_directory(path);
++    if (!fstat(host,&s) && S_ISDIR(s.st_mode)) dir=list_game_directory(guest,path);
+ #endif
+     pthread_mutex_lock(&lock);
+     int fd=-1;
 diff --git a/src/runtime_font.c b/src/runtime_font.c
 new file mode 100644
 index 0000000..c43a216

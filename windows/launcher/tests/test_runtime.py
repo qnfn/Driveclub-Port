@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 from dcport.paths import AppPaths
-from dcport.runtime import fps_note, game_command, game_env, parse_fps
+from dcport.runtime import (fps_note, game_command, game_env, mod_folders, mods_dir, parse_fps,
+                            session_mods)
 from dcport.settings import LauncherSettings
 from tests.helpers import make_data
 
@@ -25,6 +26,25 @@ def test_command_keeps_spaces_and_passes_patches(tmp_path):
     assert "--patches" in game_command(paths, game, 30)
     assert cmd[0] == str(paths.runtime) and cmd[-2:] == ["--timeout", "0"]
     assert game_command(paths, game, 60, ["--x"])[-1] == "--x"
+
+
+def test_mod_folders_in_name_order_before_the_user_folder(tmp_path):
+    paths = AppPaths.for_root(tmp_path)
+    s = LauncherSettings()
+    assert mod_folders(paths) == [] and session_mods(paths, s) == []
+    for name in ("b-cars", "A-sounds", "_off", ".hidden"):
+        (mods_dir(paths) / name).mkdir(parents=True)
+    (mods_dir(paths) / "readme.txt").write_text("not a mod")
+    found = mod_folders(paths)
+    assert [p.name for p in found] == ["A-sounds", "b-cars"]
+    assert session_mods(paths, s) == []  # Mods Off
+    s.mods = True
+    assert session_mods(paths, s) == found
+    cmd = game_command(paths, tmp_path / "g", 120, mods=found)
+    at = [i for i, a in enumerate(cmd) if a == "--app0-mod"]
+    assert [cmd[i + 1] for i in at] == [str(p) for p in found]
+    assert cmd.index("--app0") < at[0] and at[-1] < cmd.index("--user")
+    assert "--app0-mod" not in game_command(paths, tmp_path / "g", 120)
 
 
 def test_command_no_patches_file(tmp_path):

@@ -25,6 +25,7 @@ class LauncherSettings:
     upscale: str = "native"  # dcport.patches.UPSCALES; only with FSR or DLSS on
     patches: list = field(default_factory=list)  # names of dcport.patches.TOGGLES
     patch_timing: str = "deltatime"  # dcport.patches.TIMING
+    mods: bool = False  # SETUP > Mods: the folders in mods/ lie over the game's files
 
 
 def _valid(value, default) -> bool:

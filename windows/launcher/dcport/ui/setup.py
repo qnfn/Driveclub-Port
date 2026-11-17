@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """SETUP page: game folder, frame rate, window, FPS counter, anti-aliasing, prepare again."""
 
+import os
 import tkinter as tk
 from pathlib import Path
 
@@ -8,7 +9,8 @@ from dcport import patches
 from dcport.game import game_info, ready_checks
 from dcport.prepare_state import is_prepared
 from dcport.runtime import (FPS_PRESETS, LANGUAGES, fps_note, game_language, languages_for,
-                            parse_fps, player_name, scaling, scaling_ini, ui_fit)
+                            mod_folders, mods_dir, parse_fps, player_name, scaling, scaling_ini,
+                            ui_fit)
 from dcport.ui import theme
 
 FPS_ERROR = "Enter a whole number from 30 to 240"
@@ -142,6 +144,12 @@ UI_NOTES = {"1": "The menus and HUD keep their 16:9 shape and fit the width, wit
                  "race view itself is not stretched."}
 WIDE_HIGH_NOTE = " A higher Render is not available at this aspect ratio: it renders {lines} lines."
 
+MODS_NOTE = ("Experimental. Put each mod in its own folder in the mods folder, laid out like the "
+             "game folder (CUSA00003 or CUSA00093): its files replace the game's files of the "
+             "same name and path, and new files are added. When two mods have the same file, "
+             "the folder whose name comes first wins. Start a folder name with _ to switch that "
+             "mod off. Turn Mods off if the game misbehaves. Applies on the next PLAY.")
+
 
 class SetupPage(tk.Frame):
     def __init__(self, master, app):
@@ -167,6 +175,7 @@ class SetupPage(tk.Frame):
         if app.fsr:
             self._build_upscaling(self.board.add(1, 1, title="Anti-aliasing"))
         self._build_prompts(self.board.add(2, 0, title="Controller buttons"))
+        self._build_mods(self.board.add(2, 1, title="Mods (experimental)"))
         self._error = ""
         self._phase = app.phase
         self._checks: list[tuple[tk.Label, str]] = []
@@ -407,6 +416,30 @@ class SetupPage(tk.Frame):
         self._show_status(self.app.update_game_ini({key: value}) or "")
         self.refresh_session()
 
+    def _build_mods(self, card) -> None:
+        app = self.app
+        row = self._row(card)
+        row.pack(fill="x")
+        self.mods_choice = theme.Segmented(row, app, ((True, "On"), (False, "Off")), self.set_mods)
+        self.mods_choice.pack(side="left")
+        theme.PillButton(row, app, "Open mods folder", self.open_mods, kind="secondary",
+                         font=app.fonts["button"], height=app.px(32), padx=app.px(18),
+                         bg_role="panel").pack(side="left", padx=(app.px(16), 0))
+        self.mods_note = theme.text_label(card, app, MODS_NOTE, font="small", fg="muted")
+        self._wrapping(self.mods_note, card).pack(fill="x", pady=(app.px(12), 0))
+
+    def set_mods(self, on: bool) -> None:
+        self.app.settings.mods = bool(on)
+        self._saved(self.app.save_settings())
+
+    def open_mods(self) -> None:
+        folder = mods_dir(self.app.paths)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(folder))  # returns at once; Explorer opens on its own
+        except OSError as e:
+            self._show_status(f"Could not open the mods folder: {e.strerror or e}")
+
     def _build_upscaling(self, card) -> None:
         app = self.app
         grid = self._settings_grid(card)
@@ -478,6 +511,10 @@ class SetupPage(tk.Frame):
         if not typing_name:
             self.player_name.set(player_name(app.paths))
         self.language_box.set(dict(LANGUAGES)[game_language(app.paths)])
+        self.mods_choice.set(s.mods)
+        found = mod_folders(app.paths)
+        self.mods_note.configure(text=MODS_NOTE + (
+            " Found: " + ", ".join(p.name for p in found) + "." if found else " No mods found yet."))
         if not self._typing():
             if s.fps in FPS_PRESETS:
                 self.fps_choice.set(s.fps)

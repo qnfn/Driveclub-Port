@@ -87,14 +87,37 @@ def ui_fit(paths: AppPaths) -> str:
     return "0" if _ini_value(paths, "ui_fit", "1") == "0" else "1"
 
 
+def mods_dir(paths: AppPaths) -> Path:
+    return paths.root / "mods"
+
+
+def mod_folders(paths: AppPaths) -> list[Path]:
+    """The mods in mods/, each a folder laid out like the game folder, by name; a name starting
+    with "_" or "." is switched off. The runtime reads a file from the first mod that has it."""
+    try:
+        found = [p for p in mods_dir(paths).iterdir() if p.is_dir()]
+    except OSError:
+        return []
+    return sorted((p for p in found if not p.name.startswith(("_", "."))),
+                  key=lambda p: p.name.lower())
+
+
+def session_mods(paths: AppPaths, s: LauncherSettings) -> list[Path]:
+    """SETUP > Mods: the mod folders for this session (none while Mods is Off)."""
+    return mod_folders(paths) if s.mods else []
+
+
 def game_command(paths: AppPaths, game_dir: Path, fps: int,
-                 extra: Sequence[str] = ()) -> list[str]:
+                 extra: Sequence[str] = (), mods: Sequence[Path] = ()) -> list[str]:
     cmd = [str(paths.runtime), str(paths.data / "boot-linked.bin"),
            "--content-profile", str(paths.data / "content.bin")]
     patches = paths.data / "patches.bin"  # compiled for this session (dcport.patches)
     if patches.exists():
         cmd += ["--patches", str(patches)]
-    cmd += ["--app0", str(game_dir), "--user", str(paths.user), "--timeout", "0"]
+    cmd += ["--app0", str(game_dir)]
+    for mod in mods:
+        cmd += ["--app0-mod", str(mod)]
+    cmd += ["--user", str(paths.user), "--timeout", "0"]
     cmd += list(extra)
     return cmd
 

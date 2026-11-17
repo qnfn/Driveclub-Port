@@ -11,7 +11,7 @@ from dcport.game import has_eboot
 from dcport.ini import read_ini, update_ini
 from dcport.paths import AppPaths
 from dcport.prepare_state import is_prepared, prepare_command
-from dcport.runtime import game_command, game_env, session_upscale
+from dcport.runtime import game_command, game_env, session_mods, session_upscale
 from dcport.settings import load_settings
 
 TITLE = "DCport"
@@ -133,7 +133,7 @@ def run(paths: AppPaths, fsr: bool, extra: list[str], *, run_process=None,
     error = patches.build_for_session(paths, game_dir, s, session_upscale(paths, s, fsr))
     if error:
         print(error)  # the game still starts, with the patches it had
-    cmd = game_command(paths, game_dir, s.fps, extra)
+    cmd = game_command(paths, game_dir, s.fps, extra, session_mods(paths, s))
     code = run_process(cmd, game_env(paths, s, fsr, dict(os.environ)), paths.log)
     if code != 0:
         show_error(f"DRIVECLUB stopped (code {code}). Details are in: {paths.log}")
