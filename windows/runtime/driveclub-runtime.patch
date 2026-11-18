@@ -2212,7 +2212,7 @@ index 1211eb6..8773fa4 100644
          ++wait_cursor;
      }
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
-index 53525a9..f36af54 100644
+index 53525a9..617946e 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp
 @@ -4,13 +4,21 @@
@@ -3026,21 +3026,71 @@ index 53525a9..f36af54 100644
  
      const vk::MemoryAllocateFlagsInfo alloc_flags = {
          .flags = vk::MemoryAllocateFlagBits::eDeviceAddress,
-@@ -625,7 +1316,12 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
+@@ -625,13 +1316,50 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
      static u64 arena_allocated = 0;
      vk::Result alloc_result = vk::Result::eErrorOutOfDeviceMemory;
      vk::DeviceMemory device_memory{};
 -    if (!arena_limit || arena_allocated + alloc_info.allocationSize <= arena_limit) {
+-        std::tie(alloc_result, device_memory) = instance.GetDevice().allocateMemory(alloc_info);
+-        if (alloc_result == vk::Result::eSuccess) {
+-            arena_allocated += alloc_info.allocationSize;
++    u64 memory_base{}; ///< the backing's offset in `device_memory` (chunk or reserve)
 +    // DCport (#17): past the driver's budget, go straight to the system memory fallback below
 +    // instead of letting the driver evict for room (multi-second stalls -> device lost).
 +    const u32 arena_heap =
 +        instance.GetMemoryProperties().memoryTypes[arena_memory_type_index].heapIndex;
-+    const bool over_budget = instance.WouldExceedBudget(arena_heap, alloc_info.allocationSize);
-+    if (!over_budget && (!arena_limit || arena_allocated + alloc_info.allocationSize <= arena_limit)) {
-         std::tie(alloc_result, device_memory) = instance.GetDevice().allocateMemory(alloc_info);
++    const u64 size = alloc_info.allocationSize;
++    const bool over_budget = instance.WouldExceedBudget(arena_heap, size);
++    // DCport (#17): small requests share 64 MiB VRAM chunks. One driver allocation per request
++    // (16 KiB and up, never freed) left thousands of them after a few events; AMD's Windows
++    // driver then stalled seconds in vkAllocateMemory with a sparse bind pending (device lost).
++    const bool shared = size <= ARENA_CHUNK_SIZE / 4;
++    if (shared && arena_chunk && arena_chunk_size - arena_chunk_used >= size) {
++        device_memory = arena_chunk;
++        memory_base = arena_chunk_used;
++        arena_chunk_used += size;
++        alloc_result = vk::Result::eSuccess;
++    } else {
++        const u64 vram_size = shared ? ARENA_CHUNK_SIZE : size;
++        if (!instance.WouldExceedBudget(arena_heap, vram_size) &&
++            (!arena_limit || arena_allocated + vram_size <= arena_limit)) {
++            alloc_info.allocationSize = vram_size;
++            std::tie(alloc_result, device_memory) = instance.GetDevice().allocateMemory(alloc_info);
++            alloc_info.allocationSize = size;
++            if (alloc_result == vk::Result::eSuccess) {
++                arena_allocated += vram_size;
++                arena_vram_allocations++;
++                if (shared) {
++                    // The old chunk's tail (under 16 MiB) stays unused.
++                    arena_chunk = device_memory;
++                    arena_chunk_size = vram_size;
++                    arena_chunk_used = size;
++                }
++            }
++        }
++        if (alloc_result == vk::Result::eErrorOutOfDeviceMemory && shared && !over_budget &&
++            (!arena_limit || arena_allocated + size <= arena_limit)) {
++            // No room for a whole chunk: just this request, as before.
++            std::tie(alloc_result, device_memory) = instance.GetDevice().allocateMemory(alloc_info);
++            if (alloc_result == vk::Result::eSuccess) {
++                arena_allocated += size;
++                arena_vram_allocations++;
++            }
+         }
+     }
+-    u64 memory_base{}; ///< the backing's offset in `device_memory` (non-zero in the reserve)
+     if (alloc_result == vk::Result::eErrorOutOfDeviceMemory) {
+         // bbport: VRAM full. The guest memory the GPU uses is backed here and only grows as areas
+         // load; on 4-8 GB cards it ran out ("ErrorOutOfDeviceMemory" stopped the game). Another
+@@ -647,6 +1375,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
+             std::tie(alloc_result, device_memory) = instance.GetDevice().allocateMemory(alloc_info);
+         }
          if (alloc_result == vk::Result::eSuccess) {
-             arena_allocated += alloc_info.allocationSize;
-@@ -663,11 +1359,19 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
++            arena_other_allocations++;
+             Vulkan::NoteOverBudget("buffer");
+         } else if (reserve_memory && reserve_size - reserve_used >= alloc_info.allocationSize) {
+             // The reserve kept at start for this (no other memory type on NVIDIA).
+@@ -663,11 +1392,22 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
                  std::fflush(stdout);
              }
          } else {
@@ -3054,6 +3104,9 @@ index 53525a9..f36af54 100644
 +                alloc_info.memoryTypeIndex = arena_memory_type_index;
 +                std::tie(alloc_result, device_memory) =
 +                    instance.GetDevice().allocateMemory(alloc_info);
++                if (alloc_result == vk::Result::eSuccess) {
++                    arena_vram_allocations++;
++                }
 +            }
 +            if (alloc_result != vk::Result::eSuccess) {
 +                std::printf("GPU: video memory full: no room for %llu MiB of game memory (only "
@@ -3065,7 +3118,7 @@ index 53525a9..f36af54 100644
          }
      }
      device_memory = Vulkan::Check(vk::ResultValue<vk::DeviceMemory>{alloc_result, device_memory});
-@@ -914,7 +1618,21 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
+@@ -914,7 +1654,21 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
      };
  
      info.AddWait(signal_sema, signal_tick);
@@ -3089,7 +3142,7 @@ index 53525a9..f36af54 100644
          instance.ReportDeviceLost("sparse binding");
      }
 diff --git a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h b/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
-index 252b2a0..ef31eaf 100644
+index 252b2a0..160ec1e 100644
 --- a/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
 +++ b/gpu/shadps4/video_core/buffer_cache/buffer_cache.h
 @@ -5,7 +5,13 @@
@@ -3117,7 +3170,13 @@ index 252b2a0..ef31eaf 100644
  #include "video_core/texture_cache/image.h"
  
  namespace AmdGpu {
-@@ -135,6 +143,38 @@ public:
+@@ -132,9 +140,44 @@ public:
+     /// bbport: memory backing guest memory for the GPU (never freed), the reserve kept for it,
+     /// and the part of the reserve used (for the memory report).
+     [[nodiscard]] u64 ArenaBackedBytes() const { return arena_backed; }
++    [[nodiscard]] u32 ArenaAllocations() const {
++        return arena_vram_allocations + arena_other_allocations;
++    }
      [[nodiscard]] u64 ArenaReserveBytes() const { return reserve_size; }
      [[nodiscard]] u64 ArenaReserveUsedBytes() const { return reserve_used; }
  
@@ -3156,7 +3215,7 @@ index 252b2a0..ef31eaf 100644
      /// Synchronizes all buffers needed for DMA.
      void SynchronizeDmaBuffers();
  
-@@ -157,11 +197,42 @@ private:
+@@ -157,11 +200,42 @@ private:
  
      const Buffer* GetArena(u64 first_block, u64 last_block);
  
@@ -3199,7 +3258,7 @@ index 252b2a0..ef31eaf 100644
      bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                             bool is_texel_buffer);
  
-@@ -194,6 +265,53 @@ private:
+@@ -194,6 +268,53 @@ private:
      Buffer gds_buffer;
      std::unique_ptr<Buffer> null_index_buffer;
      RangeSet gpu_modified_ranges;
@@ -3253,6 +3312,20 @@ index 252b2a0..ef31eaf 100644
  
      std::unique_ptr<FaultManager> fault_manager;
      std::unique_ptr<Buffer> bda_pagetable_buffer;
+@@ -225,6 +346,13 @@ private:
+     vk::DeviceMemory reserve_memory{};
+     u64 reserve_size{};
+     u64 reserve_used{};
++    /// DCport (#17): VRAM chunk the small backings share (EnsureResident).
++    static constexpr u64 ARENA_CHUNK_SIZE = 64_MB;
++    vk::DeviceMemory arena_chunk{};
++    u64 arena_chunk_size{};
++    u64 arena_chunk_used{};
++    u32 arena_vram_allocations{}; ///< driver allocations made for the backing in VRAM
++    u32 arena_other_allocations{}; ///< ...and outside VRAM (system memory fallback)
+     u64 arena_backed{};
+     u32 block_size{};
+     u32 block_shift{};
 diff --git a/gpu/shadps4/video_core/buffer_cache/fault_manager.cpp b/gpu/shadps4/video_core/buffer_cache/fault_manager.cpp
 index e7b3adb..11757ec 100644
 --- a/gpu/shadps4/video_core/buffer_cache/fault_manager.cpp
@@ -18603,7 +18676,7 @@ index 9b8699c..9d1c2f9 100644
  
      Sampler(const Sampler&) = delete;
 diff --git a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
-index 6c56743..c2a6e49 100644
+index 6c56743..3472398 100644
 --- a/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 +++ b/gpu/shadps4/video_core/texture_cache/texture_cache.cpp
 @@ -2,6 +2,8 @@
@@ -18794,7 +18867,24 @@ index 6c56743..c2a6e49 100644
          Sampler& sampler = slot_samplers[it->second];
          sampler.hash = hash;
          sampler_lru_cache.Insert(sampler, gc_tick);
-@@ -1200,6 +1263,28 @@ void TextureCache::ReportMemory() {
+@@ -1186,13 +1249,15 @@ void TextureCache::ReportMemory() {
+     const u64 vram = instance.CanReportMemoryUsage() ? instance.GetDeviceMemoryUsage() : 0;
+     const auto process = BbProcessMemory::Get();
+     std::printf("Memory: VRAM %llu MiB; textures %llu (%llu MiB, %llu MiB on the GPU), game "
+-                "memory backing %llu MiB (reserve %llu of %llu MiB used), unused for a minute "
++                "memory backing %llu MiB in %u allocations (reserve %llu of %llu MiB used), "
++                "unused for a minute "
+                 "%llu (%llu MiB), of them GPU-written tiled %llu (%llu MiB); process %llu MiB "
+                 "committed, %llu MiB in RAM\n",
+                 (unsigned long long)(vram >> 20), (unsigned long long)image_count,
+                 (unsigned long long)(image_bytes >> 20),
+                 (unsigned long long)(image_host_bytes >> 20),
+                 (unsigned long long)(buffer_cache.ArenaBackedBytes() >> 20),
++                buffer_cache.ArenaAllocations(),
+                 (unsigned long long)(buffer_cache.ArenaReserveUsedBytes() >> 20),
+                 (unsigned long long)(buffer_cache.ArenaReserveBytes() >> 20),
+                 (unsigned long long)idle,
+@@ -1200,6 +1265,28 @@ void TextureCache::ReportMemory() {
                  (unsigned long long)(kept_bytes >> 20),
                  (unsigned long long)(process.private_bytes >> 20),
                  (unsigned long long)(process.working_set >> 20));
@@ -18823,7 +18913,7 @@ index 6c56743..c2a6e49 100644
      std::fflush(stdout);
  }
  
-@@ -1217,13 +1302,22 @@ void TextureCache::GarbageCollectImages() {
+@@ -1217,13 +1304,22 @@ void TextureCache::GarbageCollectImages() {
          // ~1 GB after its 8 GB system reserve: usage stayed above the critical mark, so the
          // collector evicted images used two or three frames ago on every submission and wrote
          // GPU-written ones back. Compare with the driver's current budget instead.

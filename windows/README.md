@@ -7,6 +7,10 @@ The Windows backend of Driveclub Native: DRIVECLUB (PS4, v01.28: EU CUSA00003 or
 ![DRIVECLUB BIKES on Windows, FSR 4](media/ingame-bike.png)
 ![Event preview on Windows, FSR 4](media/ingame-track.png)
 
+## 0.6.4
+
+- **Fewer freezes and "device lost" crashes after a few events (#17):** game memory that the GPU uses was taken from the driver in thousands of small pieces that were never returned. After a few events and cars, AMD's Windows driver (here an RX 580) took seconds to hand out the next piece even with VRAM to spare, and Windows reset it (code 23). Small pieces now come out of shared 64 MiB blocks; the log's memory line shows how many allocations it holds.
+
 ## 0.6.3
 
 - **No more seconds-long freezes when video memory is full (#17):** game memory that the GPU uses was taken from VRAM without asking how much the driver can still give. Near the limit (here an 8 GB RX 580 at 6.0 of 6.3 GB), AMD's Windows driver first moved other memory out to make room, which took seconds; Windows then reset the driver ("device lost", code 23). Past the driver's limit, that memory now comes from system memory (slower, but no freeze), and textures check the real VRAM use too.
